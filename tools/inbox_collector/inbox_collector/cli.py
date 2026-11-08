@@ -167,6 +167,7 @@ def _diagnose_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "production_mapping_validated": False,
         "production_send_allowed": False,
         "phrase_probe": payload.get("phrase_probe"),
+        "composer_report": payload.get("composer_report"),
         "nodes_omitted": True,
     }
 

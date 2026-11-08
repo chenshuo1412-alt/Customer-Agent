@@ -31,31 +31,20 @@ _FORBIDDEN = ("价格", "物流", "规格", "安装", "售后", "退款", "改�
 _ACT_JS = """
 async (replyText) => {
   const norm = (value) => String(value || "").replace(/\\s+/g, "");
-  const partsOf = (el) => {
-    const parts = [];
-    const inline = new Set(["span", "i", "em", "b", "strong", "small"]);
-    const walk = (node, root) => {
-      if (!node) return;
-      if (node.nodeType === 3) {
-        const text = norm(node.nodeValue);
-        if (text) parts.push(text);
-        return;
-      }
-      if (node.nodeType !== 1) return;
-      const tag = String(node.tagName || "").toLowerCase();
-      if (node !== root && !inline.has(tag)) return;
-      for (const child of Array.from(node.childNodes || [])) walk(child, root);
-    };
-    walk(el, el);
-    return parts;
+  const labelKind = (el) => {
+    if (el && el.querySelector && el.querySelector("textarea, input, button")) return "not_a_leaf_control";
+    let raw = "";
+    try { raw = el && el.innerText != null ? String(el.innerText) : ""; } catch (e) { raw = ""; }
+    const compact = raw.replace(/\\s+/g, "");
+    if (!compact) return "empty";
+    const lower = compact.toLowerCase();
+    if (compact === "发送" || lower === "send") return "send";
+    if (/^(?:发送|send)(?:[(（]?(?:enter|ctrl\\+enter|meta\\+enter)[)）]?)?$/i.test(compact)) return "send_with_shortcut";
+    return "other_redacted";
   };
-  const isSend = (el) => {
-    const parts = partsOf(el);
-    if (!parts.length) return false;
-    const allow = (text) => text === "发送" || text.toLowerCase() === "send";
-    if (parts.some(allow)) return true;
-    const stripped = parts.join("").replace(/(?:[(（])?(?:enter|ctrl\\+enter)(?:[)）])?$/i, "");
-    return allow(stripped);
+  const isAllow = (el) => {
+    const kind = labelKind(el);
+    return kind === "send" || kind === "send_with_shortcut";
   };
   const hidden = (el) => {
     if (!el || el.nodeType !== 1) return true;
@@ -83,14 +72,37 @@ async (replyText) => {
   const inRegion = inputs.filter((el) => !!(el.closest && el.closest(".content-box")));
   const field = inRegion.length === 1 ? inRegion[0] : null;
   if (!field) return { status: "input_not_verified", input_count: inRegion.length, clicked: false };
-  const parents = [field.parentElement, field.parentElement && field.parentElement.parentElement].filter(Boolean);
-  const senders = [];
-  for (const parent of parents) {
-    for (const child of Array.from(parent.children || [])) {
-      if (child === field || hidden(child)) continue;
-      if (isSend(child)) senders.push(child);
+  const containsRows = (el) => !!(el && el.querySelector && el.querySelector("li.onemsg"));
+  const chain = [field];
+  let cursor = field;
+  for (let step = 0; step < 8; step += 1) {
+    const parent = cursor.parentElement;
+    if (!parent || containsRows(parent)) break;
+    chain.push(parent);
+    cursor = parent;
+  }
+  const composer = chain[chain.length - 1];
+  const seeds = [composer];
+  const above = composer.parentElement;
+  if (above && containsRows(above)) {
+    for (const sib of Array.from(above.children || [])) {
+      if (sib !== composer && !containsRows(sib)) seeds.push(sib);
     }
   }
+  const senders = [];
+  const visited = new Set();
+  const walk = (el, depth) => {
+    if (!el || el.nodeType !== 1 || visited.has(el) || depth > 6 || senders.length > 4) return;
+    if (containsRows(el) && el !== composer) return;
+    visited.add(el);
+    const tag = String(el.tagName || "").toLowerCase();
+    const role = String(el.getAttribute && el.getAttribute("role") || "");
+    const type = String(el.getAttribute && el.getAttribute("type") || "");
+    const semantic = tag === "button" || tag === "a" || role === "button" || type === "button" || type === "submit";
+    if (el !== field && !hidden(el) && !el.disabled && semantic && isAllow(el)) senders.push(el);
+    for (const child of Array.from(el.children || [])) walk(child, depth + 1);
+  };
+  seeds.forEach((seed, index) => walk(seed, index === 0 ? 0 : 1));
   if (senders.length !== 1) return { status: "send_control_not_verified", sender_count: senders.length, clicked: false };
   field.value = reply;
   field.dispatchEvent(new Event("input", { bubbles: true }));
@@ -224,9 +236,10 @@ def run_owned_test_send(
     _mark_used(data_dir, "committing")
     try:
         acted = page.evaluate(_ACT_JS, {"phrase": phrase, "reply": reply})
-    except Exception:
+    except Exception as exc:
         (data_dir / _STOP).write_text("paused\n", encoding="utf-8")
-        return _base("paused_uncertain", clicked=False, **transport_audit(generator))
+        hint = str(exc).replace(phrase, "")[:180]
+        return _base("evaluate_failed", clicked=False, error_type=type(exc).__name__, error_hint=hint, **transport_audit(generator))
     if not isinstance(acted, dict):
         (data_dir / _STOP).write_text("paused\n", encoding="utf-8")
         return _base("paused_uncertain", **transport_audit(generator))

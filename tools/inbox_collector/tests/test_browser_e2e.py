@@ -1275,6 +1275,76 @@ class BrowserE2ETest(unittest.TestCase):
         self.assertEqual(report["page_acceptance"]["visible_buttons_not_described"], 0)
         self.assertFalse(report["production_mapping_validated"])
 
+    def test_non_button_send_area_is_inside_the_composer_only(self) -> None:
+        from inbox_collector.auto_reply import LoopbackGenerator
+        from inbox_collector.browser_session import DedicatedBrowser
+        from inbox_collector.dom_diagnose import export_rendered_dom
+        from inbox_collector.test_send import run_owned_test_send, write_opt_in
+
+        phrase = "客服测试2006"
+        page = (
+            "<div class='content-box'>"
+            f"<li class='onemsg'><div class='merchantMessage'><p class='msg-content-box'>{phrase}</p></div></li>"
+            "<div class='textarea-rect'><textarea class='custom-scroll'></textarea></div>"
+            "<div class='tool-row'><div role='button' class='send-hit' id='real-send'>"
+            "<div><span>发送</span></div><i>(Enter)</i></div></div></div>"
+            "<button class='el-button el-button--primary el-button--mini' type='button' id='decoy'>菜单</button>"
+            "<script>window.__hits=0; window.__decoy=0;"
+            "document.querySelector('#real-send').addEventListener('click', () => {"
+            "window.__hits += 1; const text = document.querySelector('textarea').value;"
+            "const item = document.createElement('li'); item.className='onemsg'; item.textContent=text;"
+            "document.querySelector('.content-box').appendChild(item); });"
+            "document.querySelector('#decoy').addEventListener('click', () => { window.__decoy += 1; });"
+            "</script>"
+        )
+        self.html_path.write_text(f"<!DOCTYPE html><body>{page}</body></html>", encoding="utf-8")
+        browser = DedicatedBrowser(self.data / "composer-profile")
+        browser.start()
+        self.addCleanup(browser.close)
+        browser.page.goto(f"http://127.0.0.1:{self.port}/inbox.html")
+        report = export_rendered_dom(browser.page, timeout_seconds=5, probe_phrase=phrase)
+        rendered = json.dumps(report, ensure_ascii=False)
+        self.assertNotIn(phrase, rendered)
+        self.assertNotIn("菜单", rendered)
+        self.assertNotIn("real-send", rendered)
+        composer = report["composer_report"]
+        self.assertTrue(composer["found_input"])
+        self.assertIn("custom-scroll", composer["input_classes"])
+        self.assertIn("textarea-rect", composer["composer_classes"])
+        self.assertFalse(composer["truncated"])
+        self.assertEqual(composer["allowlist_candidates"], 1)
+        leaves = [node for node in composer["nodes"] if "send-hit" in node["classes"]]
+        self.assertEqual(len(leaves), 1)
+        self.assertEqual(leaves[0]["tag"], "div")
+        self.assertEqual(leaves[0]["role"], "button")
+        self.assertEqual(leaves[0]["label_kind"], "send_with_shortcut")
+        self.assertTrue(leaves[0]["semantic_clickable"])
+        self.assertTrue(leaves[0]["inside_composer"])
+        outside = composer["outside_buttons"]
+        self.assertTrue(any("el-button--primary" in item["classes"] and item["inside_composer"] is False for item in outside))
+        self.assertTrue(all(item["label_kind"] != "send" for item in outside))
+        self.assertTrue(report["phrase_probe"]["controls_verified_for_test"])
+        self.assertEqual(report["phrase_probe"]["row"]["later_visible_rows"], 0)
+        self.assertFalse(report["production_mapping_validated"])
+
+        def transport(method: str, path: str, body: dict | None, timeout: int) -> tuple[int, dict]:
+            if path == "/api/tags":
+                return 200, {"models": [{"name": "qwen-kefu:latest", "size": 1117321521, "details": {"family": "qwen2"}}]}
+            return 200, {"response": "已收到测试。", "done": True, "done_reason": "stop"}
+
+        write_opt_in(self.data, phrase)
+        sent = run_owned_test_send(
+            browser.page,
+            self.data,
+            phrase,
+            transport=transport,
+            transport_label="injected_test_double",
+        )
+        self.assertEqual(sent["status"], "test_sent")
+        self.assertEqual(browser.page.evaluate("() => window.__hits"), 1)
+        self.assertEqual(browser.page.evaluate("() => window.__decoy"), 0)
+        self.assertFalse(sent["production_send_allowed"])
+
     def test_diagnose_uses_the_open_page_without_navigation(self) -> None:
         from inbox_collector.dom_diagnose import export_rendered_dom, service_diagnose_request
 

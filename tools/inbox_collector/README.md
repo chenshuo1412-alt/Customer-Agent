@@ -60,7 +60,7 @@ Profile 里会留下登录态，只放在本机，不要复制、同步或提交
 python -m inbox_collector diagnose-dom --data-dir data --timeout-seconds 5 --summary --probe-phrase '客服测试2006'
 ```
 
-`phrase_probe.unique` 为 true 表示这句在当前可见消息区恰好一条。`following_row` 是它后面那一条可见行的 tag、安全 class 和结构角色，不带原文。`later_visible_rows` 不是 0 时仍然拒绝发送。`list_binding` 仍是 `not_proven_no_shared_identity`。`controls_verified_for_test` 为 true 才表示消息区内恰好一个可见输入框，且父级或祖父级直接子节点里恰好一个 allowlist 发送标签。可见按钮若在更外层，看 `buttons` 里的 `relation`、`button_depth`、`input_depth`、`common_classes`。`label_kind` 为 `send` 或 `send_with_shortcut` 才是命中；`other_redacted` 是已采集但未命中；`visible_buttons_not_described` 大于 0 才是还有按钮没采集。结果不包含这句原文、姓名、id 或时间。
+`phrase_probe.unique` 为 true 表示这句在当前可见消息区恰好一条。`following_row` 是它后面那一条可见行的 tag、安全 class 和结构角色，不带原文。`later_visible_rows` 不是 0 时仍然拒绝发送。`composer_report` 是这次要看的完整结构：从可见输入框向上，停在还没包住 `li.onemsg` 的那一层，并带上同层、不含消息行的相邻容器，再向下最多 6 层、80 个节点。节点只有 tag、安全 class、role、可见性、层级和标签形状。`allowlist_candidates` 只统计这个 composer 里面、可见、可点击、且文字精确是「发送」或「发送 + Enter」的节点。composer 外面的按钮在 `outside_buttons`，`inside_composer` 为 false，不能当成发送控件。`truncated` 为 true 表示这次采样不够，也不能当成已经找全。`label_kind` 为 `other_redacted` 是已经读过渲染文字但没有命中；不要把这种按钮升级成发送。结果不包含这句原文、姓名、id 或时间。
 
 只对这一句发送一次，不是全店托管：
 

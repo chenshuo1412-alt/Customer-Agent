@@ -825,6 +825,131 @@ _EXPORT_JS = """
       looked_at: ["aria-selected", "aria-current", "li.chat-item class names", "visible siblings of textarea or text input"]
     };
   };
+  let composerCache = null;
+  const composerReport = () => {
+    if (composerCache) return composerCache;
+    const NODE_CAP = 80;
+    const DEPTH_CAP = 6;
+    const CLIMB_CAP = 8;
+    const inputs = [];
+    const searchRoots = [];
+    for (const doc of seenDocs) searchRoots.push(doc);
+    for (const shadow of seenShadows) searchRoots.push(shadow);
+    for (const root of searchRoots) {
+      let areas = [];
+      try { areas = root.querySelectorAll ? root.querySelectorAll("textarea") : []; } catch (e) { areas = []; }
+      for (const el of areas) if (!isHidden(el) && !el.disabled && !el.readOnly) inputs.push(el);
+    }
+    const input = inputs.find((el) => regionOf(el) === "message_container") || inputs[0] || null;
+    if (!input) {
+      composerCache = {
+        found_input: false, truncated: false, nodes: [], allowlist_candidates: 0,
+        outside_buttons: [], node_cap: NODE_CAP, depth_cap: DEPTH_CAP, nodes_emitted: 0
+      };
+      return composerCache;
+    }
+    const containsRows = (el) => {
+      try { return !!(el && el.querySelector && el.querySelector("li.onemsg")); } catch (e) { return false; }
+    };
+    const chain = [input];
+    let cur = input;
+    let hitMessageList = false;
+    for (let step = 0; step < CLIMB_CAP; step += 1) {
+      const parent = cur.parentElement;
+      if (!parent) break;
+      if (containsRows(parent)) { hitMessageList = true; break; }
+      chain.push(parent);
+      cur = parent;
+    }
+    const root = chain[chain.length - 1];
+    const seeds = [{ el: root, adjacent: false }];
+    const above = root.parentElement;
+    if (above && containsRows(above)) {
+      for (const sib of Array.from(above.children || [])) {
+        if (sib !== root && !containsRows(sib)) seeds.push({ el: sib, adjacent: true });
+      }
+    }
+    const nodes = [];
+    const seen = new Set();
+    let truncated = false;
+    let openShadows = 0;
+    const allow = (kind) => kind === "send" || kind === "send_with_shortcut";
+    const walk = (el, depth) => {
+      if (!el || el.nodeType !== 1 || seen.has(el)) return;
+      if (containsRows(el) && el !== root) return;
+      if (nodes.length >= NODE_CAP || depth > DEPTH_CAP) { truncated = true; return; }
+      seen.add(el);
+      const shape = labelShape(el);
+      const roleRaw = String(el.getAttribute && el.getAttribute("role") || "");
+      const role = /^[a-z][a-z0-9-]{0,24}$/.test(roleRaw) ? roleRaw : null;
+      const tag = String(el.tagName || "").toLowerCase();
+      const type = String(el.getAttribute && el.getAttribute("type") || "");
+      const semantic = tag === "button" || tag === "a" || role === "button" || type === "button" || type === "submit";
+      nodes.push({
+        tag,
+        classes: classesOf(el).slice(0, 4),
+        role,
+        hidden: isHidden(el),
+        disabled: !!(el.disabled || (el.getAttribute && el.getAttribute("aria-disabled") === "true")),
+        level_under_composer: depth,
+        is_input: tag === "textarea",
+        semantic_clickable: semantic,
+        label_kind: shape.kind,
+        label_collected: true,
+        contains_send_word: shape.contains_send_word,
+        contains_enter_hint: shape.contains_enter_hint,
+        inside_composer: true
+      });
+      if (depth === DEPTH_CAP) { truncated = true; return; }
+      for (const child of Array.from(el.children || [])) walk(child, depth + 1);
+      if (el.shadowRoot) {
+        openShadows += 1;
+        for (const child of Array.from(el.shadowRoot.children || [])) walk(child, depth + 1);
+      }
+    };
+    seeds.forEach((seed, index) => walk(seed.el, index === 0 ? 0 : 1));
+    const candidates = nodes.filter((node) => node.inside_composer && !node.hidden && !node.disabled && !node.is_input && node.semantic_clickable && allow(node.label_kind));
+    const outside = [];
+    let outsideOmitted = 0;
+    for (const rootNode of searchRoots) {
+      let buttons = [];
+      try { buttons = rootNode.querySelectorAll ? rootNode.querySelectorAll("button") : []; } catch (e) { buttons = []; }
+      for (const button of buttons) {
+        if (seen.has(button) || isHidden(button)) continue;
+        if (outside.length >= 6) { outsideOmitted += 1; continue; }
+        const shape = labelShape(button);
+        outside.push({
+          tag: "button",
+          classes: classesOf(button).slice(0, 4),
+          hidden: false,
+          label_kind: shape.kind,
+          label_collected: true,
+          contains_send_word: shape.contains_send_word,
+          contains_enter_hint: shape.contains_enter_hint,
+          inside_composer: false
+        });
+      }
+    }
+    composerCache = {
+      found_input: true,
+      input_count: inputs.length,
+      input_classes: classesOf(input).slice(0, 4),
+      composer_classes: classesOf(root).slice(0, 4),
+      climb_steps: chain.length - 1,
+      stopped_at_message_list: hitMessageList,
+      climb_capped: chain.length - 1 >= CLIMB_CAP && !hitMessageList,
+      truncated,
+      node_cap: NODE_CAP,
+      depth_cap: DEPTH_CAP,
+      nodes_emitted: nodes.length,
+      open_shadows_entered: openShadows,
+      nodes,
+      allowlist_candidates: candidates.length,
+      outside_buttons: outside,
+      outside_buttons_not_described: outsideOmitted
+    };
+    return composerCache;
+  };
   const phraseProbe = (phrase) => {
     const wanted = String(phrase || "").replace(/\\s+/g, "");
     if (!wanted) return { provided: false, match_count: 0, unique: false };
@@ -889,13 +1014,11 @@ _EXPORT_JS = """
     } else {
       result.following_row = { collected: false };
     }
-    const probe = composerProbe();
-    const inputs = (probe.textareas || []).filter((item) => !item.hidden && item.in_message_region);
-    const allowHit = (item) => item && !item.hidden && (item.label_kind === "send" || item.label_kind === "send_with_shortcut");
-    const senders = (probe.near_input || []).filter(allowHit);
-    result.input_in_message_region = inputs.length;
-    result.send_label_near_input = senders.length;
-    result.controls_verified_for_test = inputs.length === 1 && senders.length === 1 && index >= 0 && result.row.later_visible_rows === 0;
+    const composer = composerReport();
+    result.input_in_message_region = composer.input_count || 0;
+    result.send_label_near_input = composer.allowlist_candidates || 0;
+    result.composer_truncated = composer.truncated === true;
+    result.controls_verified_for_test = composer.found_input === true && composer.input_count === 1 && composer.allowlist_candidates === 1 && composer.truncated !== true && index >= 0 && result.row.later_visible_rows === 0;
     result.production_send_allowed = false;
     return result;
   };
@@ -933,6 +1056,7 @@ _EXPORT_JS = """
     },
     message_preflight: summarize(secondPass, comparePasses(firstPass, secondPass)),
     composer_probe: composerProbe(),
+    composer_report: composerReport(),
     phrase_probe: phraseProbe(probePhrase),
     value_assessment: { groups, shell_ids: shell }
   };
@@ -1437,9 +1561,87 @@ def _clean_phrase_probe(raw: Any) -> dict[str, Any]:
         "following_row": _clean_following(raw.get("following_row")),
         "input_in_message_region": _clean_int(raw.get("input_in_message_region")),
         "send_label_near_input": _clean_int(raw.get("send_label_near_input")),
-        "controls_verified_for_test": raw.get("controls_verified_for_test") is True,
+        "composer_truncated": raw.get("composer_truncated") is True,
+        "controls_verified_for_test": raw.get("controls_verified_for_test") is True and raw.get("composer_truncated") is not True,
         "production_send_allowed": False,
         "values_included": False,
+    }
+
+
+def _clean_composer(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {"found_input": False, "truncated": False, "nodes": [], "allowlist_candidates": 0, "outside_buttons": []}
+    nodes = []
+    for item in raw.get("nodes") or []:
+        if not isinstance(item, dict) or len(nodes) >= 80:
+            continue
+        classes = [token for token in item.get("classes") or [] if isinstance(token, str) and _SAFE_CLASS.fullmatch(token)]
+        label = item.get("label_kind")
+        role = item.get("role")
+        tag = item.get("tag")
+        nodes.append(
+            {
+                "tag": tag if isinstance(tag, str) and _SAFE_CLASS.fullmatch(tag) else "other",
+                "classes": classes[:4],
+                "role": role if isinstance(role, str) and _SAFE_CLASS.fullmatch(role) else None,
+                "hidden": item.get("hidden") is True,
+                "disabled": item.get("disabled") is True,
+                "level_under_composer": _clean_int(item.get("level_under_composer")),
+                "is_input": item.get("is_input") is True,
+                "semantic_clickable": item.get("semantic_clickable") is True,
+                "label_kind": label
+                if label in {"send", "send_with_shortcut", "contains_send_word", "empty", "other_redacted", "not_a_leaf_control"}
+                else "other_redacted",
+                "label_collected": True,
+                "contains_send_word": item.get("contains_send_word") is True,
+                "contains_enter_hint": item.get("contains_enter_hint") is True,
+                "inside_composer": True,
+            }
+        )
+    outside = []
+    for item in raw.get("outside_buttons") or []:
+        if not isinstance(item, dict) or len(outside) >= 6:
+            continue
+        classes = [token for token in item.get("classes") or [] if isinstance(token, str) and _SAFE_CLASS.fullmatch(token)]
+        label = item.get("label_kind")
+        outside.append(
+            {
+                "tag": "button",
+                "classes": classes[:4],
+                "label_kind": label
+                if label in {"send", "send_with_shortcut", "contains_send_word", "empty", "other_redacted", "not_a_leaf_control"}
+                else "other_redacted",
+                "label_collected": True,
+                "contains_send_word": item.get("contains_send_word") is True,
+                "contains_enter_hint": item.get("contains_enter_hint") is True,
+                "inside_composer": False,
+            }
+        )
+    composer_classes = [
+        token for token in raw.get("composer_classes") or [] if isinstance(token, str) and _SAFE_CLASS.fullmatch(token)
+    ]
+    input_classes = [
+        token for token in raw.get("input_classes") or [] if isinstance(token, str) and _SAFE_CLASS.fullmatch(token)
+    ]
+    return {
+        "found_input": raw.get("found_input") is True,
+        "input_count": _clean_int(raw.get("input_count")),
+        "input_classes": input_classes[:4],
+        "composer_classes": composer_classes[:4],
+        "climb_steps": _clean_int(raw.get("climb_steps")),
+        "stopped_at_message_list": raw.get("stopped_at_message_list") is True,
+        "climb_capped": raw.get("climb_capped") is True,
+        "truncated": raw.get("truncated") is True,
+        "node_cap": _clean_int(raw.get("node_cap")) or 80,
+        "depth_cap": _clean_int(raw.get("depth_cap")) or 6,
+        "nodes_emitted": len(nodes),
+        "open_shadows_entered": _clean_int(raw.get("open_shadows_entered")),
+        "allowlist_candidates": _clean_int(raw.get("allowlist_candidates")),
+        "outside_buttons_not_described": _clean_int(raw.get("outside_buttons_not_described")),
+        "nodes": nodes,
+        "outside_buttons": outside,
+        "official_composer_verified": False,
+        "production_mapping_validated": False,
     }
 
 
@@ -1464,7 +1666,11 @@ def export_rendered_dom(page: Any, *, timeout_seconds: float = 2.0, probe_phrase
     _apply_scope(report, raw)
     report["message_preflight"] = _clean_preflight(raw.get("message_preflight"))
     report["page_acceptance"] = _page_acceptance(report["message_preflight"], raw.get("composer_probe"))
+    report["composer_report"] = _clean_composer(raw.get("composer_report"))
     report["phrase_probe"] = _clean_phrase_probe(raw.get("phrase_probe"))
+    if report["composer_report"].get("truncated") is True:
+        report["phrase_probe"]["controls_verified_for_test"] = False
+        report["phrase_probe"]["composer_truncated"] = True
     if probe_phrase and probe_phrase in json.dumps(report, ensure_ascii=False):
         report["phrase_probe"] = {"provided": True, "accepted": False, "reason": "phrase_leaked", "match_count": 0, "unique": False, "production_send_allowed": False}
     preflight = report["message_preflight"]
