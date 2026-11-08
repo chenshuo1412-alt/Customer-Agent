@@ -7,8 +7,7 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
-# Reserved for a future verified browser adapter. This build does not launch a browser.
-browser = []
+browser = ["playwright==1.49.1"]
 
 [project.scripts]
 inbox-collector = "inbox_collector.cli:main"

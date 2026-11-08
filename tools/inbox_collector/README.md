@@ -15,7 +15,7 @@ python -m unittest discover -s tests -t . -v
 python -m inbox_collector demo --data-dir /tmp/inbox-collector-demo
 ```
 
-`validate-mapping` 必须以非 0 退出，并标明 mapping 未验证。`demo` 只使用内置模拟会话，退出后进程结束，不会留在后台。
+`validate-mapping` 对商家 mapping 必须以非 0 退出。`mappings/generic_local_inbox.json` 只验证本地通用页面，可以通过，但不能拿去开实店。`demo` 不启动浏览器。`config.browser-local.example.json` 的地址是本机 9 端口，用来说明配置形状；真正打开浏览器要另起一个本机页面再执行 `run`。商家网址在配置加载时就会被拒绝。
 
 示例草稿见 `sample_output/mock_draft.example.json`。`draft_text` 固定为模拟句，不是模型写给买家的答案。
 
@@ -67,10 +67,11 @@ HTTP 200 只表示传输被接受，状态是 `webhook_transport_accepted_awaiti
 
 ## 从「代码已写好」到「真实运行」还缺什么
 
-1. **登录。** 需要操作者在独立的有界面 Chrome/Chromium 里自己打开 `https://mms.pinduoduo.com/chat-merchant/index.html#/` 并完成登录。程序不填账号密码。遇到登录页、验证码或「账号在别处登录」只告警暂停。本版本的 `launch_independent_browser` 直接拒绝，不会启动浏览器。
-2. **真实 DOM 核对。** `mappings/pinduoduo_chat_merchant.json` 的 `validated` 为 false，`selectors` 为空。必须在授权前提下核对稳定会话 key、message id、方向、带时区的消息时间、回复状态及其来源，并写成 mapping，且 `validation_status` 为 `verified_against_live_dom`。在此之前不能把 fixture 的 `data-*` 选择器拿去套真实页面。
-3. **Webhook 授权。** 操作者自行提供 URL 和 secret，并打开上面的网络开关。还要定义回执里如何用 `event_id` 交回草稿。在那之前，投递成功不能当成已经拿到回复。
-4. **模型。** 若不用 Webhook 而用独立模型，需要另一次明确开启；当前代码即使配了模型也不会发请求。
-5. **数据授权。** 没有授权时不要把真实买家消息放进这个库。
+代码能打开的是**新建的有界面 Chromium** 和一块空的 `data_dir/own-browser-profile`。这不等于实店已登录，也不是操作者原来的 Chrome 主账号。
 
-即使以后补上 mapping，也还要删掉运行器里的 `real_mode_refused` / `real_store_not_authorized` 硬拒绝，并单独验证浏览器。在那之前，health 里的 `real_store_connected` 保持 false。
+1. **实店登录。** 商家地址在配置阶段就拒绝，浏览器不会打开。以后若要登录，操作者必须在这个新 profile 里自己打开聊天页。程序不填账号密码。登录页、验证码、「账号在别处登录」只写本地告警并暂停，不会自动重登，也没有远端叫醒。`claims_user_wakeup` 恒为 false，`alert_delivery` 是 `local_only`。
+2. **真实 DOM。** `mappings/pinduoduo_chat_merchant.json` 仍然没有选择器。`live_dom_verified` 恒为 false。本地 mapping 的 `data-*` 只用于本仓库的通用收件箱，不能套到商家页面。
+3. **BOT。** 没有 Webhook 密钥，也没有确认现有 BOT 只出草稿。默认 `bot_integration` 是 `blocked_not_connected`。即使以后配齐 URL、secret 和网络开关，状态也只是 `webhook_configured_unverified`。传输成功不是草稿已生成，更不是 BOT 的真实回复。mock 草稿带「模拟草稿」字样。
+4. **调度。** 前台循环的间隔仍是 60–120 秒，由本程序自己 `sleep`。它不是 Bot routine，也不会去接管别的浏览器或调试端口。
+
+`mode=real` 保持停止。不要把 `browser_local` 的测试浏览器当成实店已接通。

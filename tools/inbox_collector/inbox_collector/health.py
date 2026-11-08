@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from inbox_collector.config import AppConfig, readiness_problems
-from inbox_collector.mapping import mapping_validated
+from inbox_collector.mapping import local_fixture_problems, mapping_validated
 from inbox_collector.providers import WebhookProvider
 from inbox_collector.store import Store
 
@@ -20,8 +20,10 @@ def build_health(
 ) -> dict[str, Any]:
     state, reason = store.state_reason()
     problems = [] if config is None else readiness_problems(config, mapping)
-    if config is not None and config.mode != "fixture":
+    if config is not None and config.mode == "real":
         problems.append("real_mode_refused")
+    elif config is not None and config.mode not in {"fixture", "browser_local"}:
+        problems.append("mode_invalid")
     if problems and state == "running":
         state = "stopped"
         reason = "config_incomplete"
@@ -29,6 +31,16 @@ def build_health(
         state = "stopped"
         reason = "process_not_alive"
     webhook_allowed = isinstance(provider, WebhookProvider) and provider.network_allowed()
+    if (
+        config is not None
+        and config.draft_provider == "webhook"
+        and config.webhook_enabled
+        and config.webhook_allow_network
+        and webhook_allowed
+    ):
+        bot_integration = "webhook_configured_unverified"
+    else:
+        bot_integration = "blocked_not_connected"
     return {
         "state": state,
         "state_reason": reason,
@@ -37,7 +49,16 @@ def build_health(
         "mapping_validated": bool(mapping) and mapping_validated(mapping),
         "source_kind": store.get_meta("last_source_kind"),
         "real_store_connected": False,
-        "browser_launched": False,
+        "real_store_login_verified": False,
+        "live_dom_verified": False,
+        "local_fixture_mapping_ok": bool(mapping) and local_fixture_problems(mapping) == [],
+        "browser_launched": store.get_meta("browser_launched") == "1",
+        "browser_headless": False,
+        "browser_attached_to_existing": False,
+        "bot_integration": bot_integration,
+        "bot_reply_received": False,
+        "drafts_are_bot_replies": False,
+        "alert_delivery": "local_only",
         "claims_user_wakeup": False,
         "alert_sink_enabled": bool(config and config.alert_sink_enabled),
         "alert_sink_delivered": False,

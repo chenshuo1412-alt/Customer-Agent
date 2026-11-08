@@ -39,6 +39,8 @@ class Runner:
             provider,
             retention_days=config.retention_days,
         )
+        if getattr(self.source, "on_launched", None) is None and hasattr(self.source, "browser"):
+            self.source.on_launched = self._remember_browser
 
     def health(self, process_alive: bool) -> dict[str, Any]:
         return build_health(
@@ -51,8 +53,10 @@ class Runner:
 
     def run_once(self) -> dict[str, Any]:
         problems = readiness_problems(self.config, self.mapping)
-        if self.config.mode != "fixture":
+        if self.config.mode == "real":
             problems.append("real_mode_refused")
+        elif self.config.mode not in {"fixture", "browser_local"}:
+            problems.append("mode_invalid")
         if problems:
             self.store.set_state("stopped", "config_incomplete")
             self.store.set_meta("readiness_problems", ",".join(dict.fromkeys(problems)))
@@ -131,3 +135,16 @@ class Runner:
             else:
                 self.store.set_state("paused", code)
         log_event("alert", alert=code, count=streak)
+
+    def close(self) -> None:
+        source = self.source
+        closer = getattr(source, "close", None)
+        if closer is not None:
+            closer()
+
+    def _remember_browser(self, browser: object) -> None:
+        self.store.set_meta("browser_launched", "1")
+        self.store.set_meta("browser_headless", "0")
+        self.store.set_meta("browser_pid", str(getattr(browser, "pid", "") or ""))
+        self.store.set_meta("real_store_login_verified", "0")
+        self.store.set_meta("bot_reply_received", "0")

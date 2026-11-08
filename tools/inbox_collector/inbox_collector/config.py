@@ -8,7 +8,13 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from inbox_collector.mapping import load_mapping, mapping_problems
+from inbox_collector.mapping import (
+    entry_allowed_by_mapping,
+    load_mapping,
+    local_entry_problems,
+    local_fixture_problems,
+    mapping_problems,
+)
 
 _ALLOWED_SECRET_ENV_KEYS = {"webhook_secret_env", "alert_secret_env", "model_api_key_env"}
 _FORBIDDEN_FRAGMENTS = ("password", "cookie", "token", "api_key", "authorization")
@@ -35,6 +41,8 @@ class AppConfig:
     alert_sink_url: str
     model_enabled: bool
     retention_days: int
+    entry_url: str
+    login_wait_seconds: int
     config_path: Path
 
 
@@ -74,7 +82,7 @@ def load_config(path: Path) -> tuple[AppConfig | None, list[str]]:
         problems.append("remote_config_refused")
 
     mode = str(raw.get("mode") or "").strip()
-    if mode not in {"fixture", "real"}:
+    if mode not in {"fixture", "real", "browser_local"}:
         problems.append("mode_invalid")
     timezone = str(raw.get("timezone") or "").strip()
     try:
@@ -104,6 +112,13 @@ def load_config(path: Path) -> tuple[AppConfig | None, list[str]]:
     provider = str(raw.get("draft_provider") or "none").strip()
     if provider not in {"none", "mock", "webhook", "model"}:
         problems.append("draft_provider_invalid")
+    login_wait = raw.get("login_wait_seconds", 180)
+    if not isinstance(login_wait, int) or isinstance(login_wait, bool) or not 1 <= login_wait <= 600:
+        problems.append("login_wait_invalid")
+        login_wait = 0
+    entry_url = str(raw.get("entry_url") or "").strip()
+    if mode == "browser_local":
+        problems.extend(local_entry_problems(entry_url))
 
     base = path.parent
     mapping_value = raw.get("mapping_path")
@@ -180,6 +195,8 @@ def load_config(path: Path) -> tuple[AppConfig | None, list[str]]:
             alert_sink_url=alert_url,
             model_enabled=model_enabled,
             retention_days=int(retention),
+            entry_url=entry_url,
+            login_wait_seconds=int(login_wait),
             config_path=path.resolve(),
         ),
         [],
@@ -191,10 +208,12 @@ def readiness_problems(config: AppConfig, mapping: dict[str, Any] | None) -> lis
     if config.mode == "real":
         problems.extend(mapping_problems(mapping, open_conversation=config.open_conversation))
         problems.append("real_store_not_authorized")
-        if config.allow_browser_launch:
-            problems.append("browser_launch_unverified")
-        else:
-            problems.append("browser_launch_disabled")
+        problems.append("live_browser_blocked_until_dom_verified")
+    elif config.mode == "browser_local":
+        if config.open_conversation:
+            problems.append("open_conversation_not_permitted")
+        problems.extend(local_fixture_problems(mapping))
+        problems.extend(entry_allowed_by_mapping(config.entry_url, mapping))
     elif config.mode != "fixture":
         problems.append("mode_invalid")
     if config.mode == "fixture" and (config.fixture_path is None or not config.fixture_path.is_file()):

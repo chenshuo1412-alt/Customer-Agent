@@ -623,6 +623,16 @@ class CollectorTest(unittest.TestCase):
             assert_isolated_profile(Path("/Users/example/Library/Application Support/Google/Chrome"))
         store.close()
 
+    def test_merchant_entry_is_refused_before_a_browser_exists(self) -> None:
+        path = self.config(
+            mode="browser_local",
+            entry_url="https://mms.pinduoduo.com/chat-merchant/index.html#/",
+            mapping_path=str(ROOT / "mappings" / "generic_local_inbox.json"),
+        )
+        loaded, problems = load_config(path)
+        self.assertIsNone(loaded)
+        self.assertIn("merchant_origin_refused", problems)
+
     def test_cli_demo_and_shipped_mapping(self) -> None:
         self.assertEqual(main(["validate-mapping", "--mapping", str(MAPPING)]), 2)
         self.assertEqual(main(["check-config", "--config", str(ROOT / "config.fixture.example.json")]), 0)
@@ -677,12 +687,17 @@ class SafetyScanTest(unittest.TestCase):
                     else:
                         names = [node.module or ""]
                     if any(name.startswith(("playwright", "PyQt6", "Channel", "bridge")) for name in names):
-                        offenders.append(f"{path.name}:import:{names}")
+                        if not (path.name == "browser_session.py" and any(name.startswith("playwright") for name in names)):
+                            offenders.append(f"{path.name}:import:{names}")
         self.assertEqual(offenders, [])
         provider = (PACKAGE / "providers.py").read_text(encoding="utf-8")
         self.assertLess(provider.index(WEBHOOK_NETWORK_ENV), provider.index("urlopen"))
         self.assertNotIn("urlopen", (PACKAGE / "browser_plan.py").read_text(encoding="utf-8"))
         self.assertNotIn("urlopen", (PACKAGE / "runner.py").read_text(encoding="utf-8"))
+        dom = (PACKAGE / "dom_source.py").read_text(encoding="utf-8")
+        self.assertNotIn(".click(", dom)
+        self.assertNotIn(".fill(", dom)
+        self.assertNotIn("keyboard", dom)
 
 
 if __name__ == "__main__":

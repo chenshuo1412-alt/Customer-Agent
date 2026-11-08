@@ -13,7 +13,7 @@ from inbox_collector.browser_plan import BrowserLaunchRefused, assert_isolated_p
 from inbox_collector.config import AppConfig, load_config, load_mapping_for, readiness_problems
 from inbox_collector.demo_data import BASELINE_SNAPSHOT, NEW_SNAPSHOT
 from inbox_collector.health import build_health
-from inbox_collector.mapping import mapping_problems
+from inbox_collector.mapping import local_fixture_problems, mapping_problems
 from inbox_collector.models import snapshot_from_dict
 from inbox_collector.pipeline import Pipeline
 from inbox_collector.providers import MockProvider, WebhookProvider, provider_for
@@ -28,9 +28,7 @@ def _print(payload: dict[str, Any]) -> None:
 
 def _mapping_and_runner(config: AppConfig, *, transport: object | None = None) -> Runner:
     mapping, map_errors = load_mapping_for(config)
-    if config.mode != "fixture":
-        mapping = mapping
-    elif map_errors:
+    if config.mode == "fixture" and map_errors:
         mapping = None
     webhook = None
     if config.draft_provider == "webhook":
@@ -45,6 +43,17 @@ def _mapping_and_runner(config: AppConfig, *, transport: object | None = None) -
     problems = readiness_problems(config, mapping)
     if config.mode == "fixture" and not problems and config.fixture_path is not None:
         source = FixtureSource(config.fixture_path)
+    if config.mode == "browser_local" and not problems and mapping is not None:
+        from inbox_collector.browser_session import DedicatedBrowser
+        from inbox_collector.dom_source import BrowserDomSource
+
+        source = BrowserDomSource(
+            DedicatedBrowser(config.data_dir / "own-browser-profile"),
+            config.entry_url,
+            mapping,
+            timezone_name=config.timezone,
+            login_wait_seconds=config.login_wait_seconds,
+        )
     return Runner(config, mapping, source, provider)
 
 
@@ -55,7 +64,7 @@ def cmd_check(config_path: Path) -> int:
         return 2
     mapping, _errors = load_mapping_for(config)
     ready = readiness_problems(config, mapping)
-    if config.mode != "fixture":
+    if config.mode == "real":
         ready.append("real_mode_refused")
     _print(
         {
@@ -63,8 +72,10 @@ def cmd_check(config_path: Path) -> int:
             "problems": ready,
             "state": "stopped",
             "real_store_connected": False,
-            "mapping_validated": False if mapping is None else mapping.get("validated") is True
-            and not mapping_problems(mapping),
+            "mapping_validated": bool(mapping) and mapping_problems(mapping) == [],
+            "local_fixture_mapping_ok": bool(mapping) and local_fixture_problems(mapping) == [],
+            "live_dom_verified": False,
+            "bot_integration": "blocked_not_connected",
             "sample_interval_seconds": config.sample_interval_seconds,
             "interval_is_bot_routine": False,
         }
@@ -80,17 +91,21 @@ def cmd_validate_mapping(path: Path) -> int:
     except (OSError, json.JSONDecodeError, ValueError):
         _print({"validated": False, "problems": ["mapping_unreadable"], "real_store_connected": False})
         return 2
-    problems = mapping_problems(mapping)
+    merchant_ok = mapping_problems(mapping) == []
+    local_ok = local_fixture_problems(mapping) == []
     _print(
         {
             "mapping_id": mapping.get("mapping_id"),
-            "validated": not problems,
-            "problems": problems,
+            "merchant_mapping_validated": merchant_ok,
+            "local_fixture_mapping_ok": local_ok,
+            "live_dom_verified": False,
+            "validated": merchant_ok,
+            "problems": [] if local_ok or merchant_ok else mapping_problems(mapping),
             "real_store_connected": False,
-            "fixture_selectors_applied": False,
+            "fixture_selectors_applied_to_merchant_site": False,
         }
     )
-    return 0 if not problems else 2
+    return 0 if local_ok or merchant_ok else 2
 
 
 def cmd_run(config_path: Path, *, once: bool, cycles: int) -> int:
@@ -99,10 +114,13 @@ def cmd_run(config_path: Path, *, once: bool, cycles: int) -> int:
         _print({"ok": False, "problems": problems, "state": "stopped", "real_store_connected": False})
         return 2
     runner = _mapping_and_runner(config)
-    if once:
-        report = runner.run_once()
-    else:
-        report = runner.run_foreground(cycles, sleep_fn=time.sleep)
+    try:
+        if once:
+            report = runner.run_once()
+        else:
+            report = runner.run_foreground(cycles, sleep_fn=time.sleep)
+    finally:
+        runner.close()
     _print(report)
     return _exit_for(report)
 
@@ -274,13 +292,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         if config is None:
             _print({"launch": False, "problems": problems, "verified": False})
             return 2
+        mapping, _errors = load_mapping_for(config)
         try:
-            plan = browser_plan(config)
+            plan = browser_plan(config, mapping)
         except BrowserLaunchRefused as exc:
             _print({"launch": False, "verified": False, "problems": [exc.code]})
             return 2
         _print(plan)
-        return 2
+        return 0 if plan.get("launch") else 2
     return 2
 
 

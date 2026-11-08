@@ -1,0 +1,31 @@
+{
+  "mapping_id": "generic.local-inbox",
+  "scope": "local_fixture",
+  "validated": true,
+  "validation_status": "verified_local_fixture_only",
+  "list_fields_sufficient": true,
+  "allowed_origins": ["file", "http://127.0.0.1", "http://localhost"],
+  "selectors": {
+    "page_root": "[data-fixture='generic-inbox']",
+    "page_state_inbox": "[data-fixture='generic-inbox'][data-page-state='inbox']",
+    "page_state_login": "[data-fixture='generic-inbox'][data-page-state='login']",
+    "page_state_captcha": "[data-fixture='generic-inbox'][data-page-state='captcha']",
+    "page_state_account_elsewhere": "[data-fixture='generic-inbox'][data-page-state='account_elsewhere']",
+    "message_list_complete": "[data-fixture='generic-inbox'][data-message-list-complete='true']",
+    "message": "[data-fixture='generic-inbox'] article[data-message-id]",
+    "conversation_key": "data-conversation-key",
+    "identity_verified": "data-identity-verified",
+    "message_id": "data-message-id",
+    "direction": "data-direction",
+    "message_time": "data-message-time",
+    "time_precision": "data-time-precision",
+    "list_time": "data-list-time",
+    "reply_status": "data-reply-status",
+    "reply_status_source": "data-reply-source",
+    "reply_status_reliability": "data-reply-reliability"
+  },
+  "notes": [
+    "这些选择器只匹配本仓库的本地通用收件箱页面。",
+    "不能用在拼多多商家后台。实店 DOM 仍未验证。"
+  ]
+}

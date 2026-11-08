@@ -1,0 +1,24 @@
+{
+  "mode": "browser_local",
+  "timezone": "Asia/Shanghai",
+  "sample_interval_seconds": 120,
+  "login_wait_seconds": 180,
+  "max_retries": 2,
+  "max_consecutive_failures": 3,
+  "open_conversation": false,
+  "allow_browser_launch": true,
+  "mapping_path": "mappings/generic_local_inbox.json",
+  "entry_url": "http://127.0.0.1:9/inbox.html",
+  "data_dir": "data",
+  "draft_provider": "mock",
+  "retention_days": 30,
+  "webhook": {
+    "enabled": false
+  },
+  "alert_sink": {
+    "enabled": false
+  },
+  "model": {
+    "enabled": false
+  }
+}
