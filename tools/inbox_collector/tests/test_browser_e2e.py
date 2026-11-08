@@ -27,7 +27,26 @@ from inbox_collector.providers import provider_for
 
 ROOT = Path(__file__).resolve().parents[1]
 MAPPING = ROOT / "mappings" / "generic_local_inbox.json"
-ARTIFACTS = Path("/opt/cursor/artifacts")
+
+
+def evidence_directory() -> Path:
+    """User-writable evidence directory. Never creates a system directory.
+
+    ``INBOX_COLLECTOR_TEST_ARTIFACTS`` is used only when its parent already
+    exists and is writable. Otherwise evidence stays in the checkout's
+    ``.test-artifacts`` directory, which the person running the tests owns.
+    """
+    override = os.environ.get("INBOX_COLLECTOR_TEST_ARTIFACTS", "").strip()
+    if override:
+        candidate = Path(override)
+        parent = candidate.parent
+        if parent.is_dir() and os.access(parent, os.W_OK):
+            candidate.mkdir(mode=0o700, exist_ok=True)
+            if candidate.is_dir() and os.access(candidate, os.W_OK):
+                return candidate
+    local = ROOT / ".test-artifacts"
+    local.mkdir(mode=0o700, exist_ok=True)
+    return local
 
 
 def _article(message_id: str, body: str, when: str) -> str:
@@ -69,6 +88,24 @@ class _Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt: str, *args: object) -> None:
         return
+
+
+class EvidencePathTest(unittest.TestCase):
+    def test_missing_override_parent_does_not_create_system_directories(self) -> None:
+        missing_parent = Path("/opt/cursor-not-created/artifacts")
+        self.assertFalse(missing_parent.parent.exists())
+        previous = os.environ.get("INBOX_COLLECTOR_TEST_ARTIFACTS")
+        os.environ["INBOX_COLLECTOR_TEST_ARTIFACTS"] = str(missing_parent)
+        try:
+            chosen = evidence_directory()
+        finally:
+            if previous is None:
+                os.environ.pop("INBOX_COLLECTOR_TEST_ARTIFACTS", None)
+            else:
+                os.environ["INBOX_COLLECTOR_TEST_ARTIFACTS"] = previous
+        self.assertFalse(missing_parent.parent.exists())
+        self.assertEqual(chosen, ROOT / ".test-artifacts")
+        self.assertTrue(os.access(chosen, os.W_OK))
 
 
 class BrowserE2ETest(unittest.TestCase):
@@ -232,8 +269,10 @@ class BrowserE2ETest(unittest.TestCase):
         self.assertTrue(process_exists(pid))
         page = runner.source.browser.page
         self.assertTrue(page.url.startswith(f"http://127.0.0.1:{self.port}/"))
-        ARTIFACTS.mkdir(parents=True, exist_ok=True)
-        page.screenshot(path=str(ARTIFACTS / "browser-e2e-inbox.png"))
+        evidence_dir = evidence_directory()
+        screenshot = evidence_dir / "browser-e2e-inbox.png"
+        page.screenshot(path=str(screenshot))
+        self.assertGreater(screenshot.stat().st_size, 0)
         spool = json.loads(next((self.data / "spool").glob("*.json")).read_text(encoding="utf-8"))
         self.assertEqual(spool["draft_text"], CANNED_DRAFT_TEXT)
         self.assertTrue(spool["synthetic"])
@@ -263,11 +302,14 @@ class BrowserE2ETest(unittest.TestCase):
             "draft_text": spool["draft_text"],
             "drafts_are_bot_replies": False,
             "alert_delivery": "local_only",
+            "evidence_directory": str(evidence_dir),
         }
-        (ARTIFACTS / "browser-e2e-evidence.json").write_text(
-            json.dumps(evidence, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        evidence_path = evidence_dir / "browser-e2e-evidence.json"
+        evidence_path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        saved = json.loads(evidence_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["draft_text"], CANNED_DRAFT_TEXT)
+        self.assertFalse(saved["restart_duplicate_inbound"])
+        self.assertTrue(os.access(evidence_dir, os.W_OK))
 
     def test_login_page_alerts_locally_without_typing(self) -> None:
         self.html_path.write_text(
