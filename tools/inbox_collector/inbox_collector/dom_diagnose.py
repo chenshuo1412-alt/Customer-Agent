@@ -634,6 +634,76 @@ _EXPORT_JS = """
       can_use_for_dedupe: false
     };
   };
+  const controlLabelKind = (el) => {
+    const compact = String(el.innerText || el.textContent || "").replace(/\\s+/g, "");
+    if (compact.length > 8) return "other_redacted";
+    if (compact === "发送" || compact.toLowerCase() === "send") return "send";
+    return "other_redacted";
+  };
+  const composerProbe = () => {
+    const textareas = [];
+    const buttons = [];
+    let passwordSkipped = 0;
+    let editables = 0;
+    let chatVisible = 0;
+    let chatHidden = 0;
+    let ariaSelected = 0;
+    let ariaCurrent = 0;
+    const roots = [];
+    for (const doc of seenDocs) roots.push(doc);
+    for (const shadow of seenShadows) roots.push(shadow);
+    for (const root of roots) {
+      let controls = [];
+      try {
+        controls = root.querySelectorAll ? root.querySelectorAll("textarea, input, button, [contenteditable='true']") : [];
+      } catch (e) { controls = []; }
+      for (const el of controls) {
+        const tag = String(el.tagName || "").toLowerCase();
+        if (tag === "input") {
+          const type = String(el.getAttribute("type") || "text").toLowerCase();
+          if (type === "password" || type === "hidden" || type === "file") { passwordSkipped += 1; continue; }
+          if (type !== "text" && type !== "search") continue;
+        }
+        const attrs = [];
+        for (const attr of Array.from(el.attributes || [])) {
+          const name = String(attr.name || "");
+          if (name === "tabindex" || name.indexOf("data-v-") === 0 || name === "value" || name === "placeholder") continue;
+          if (/^[A-Za-z_:][A-Za-z0-9_:-]{0,40}$/.test(name) && attrs.indexOf(name) < 0 && attrs.length < 8) attrs.push(name);
+        }
+        const record = {
+          tag,
+          classes: classesOf(el).slice(0, 4),
+          disabled: !!(el.disabled || el.getAttribute("aria-disabled") === "true"),
+          read_only: el.readOnly === true || el.getAttribute("readonly") !== null,
+          hidden: isHidden(el),
+          in_message_region: regionOf(el) === "message_container",
+          attr_names: attrs
+        };
+        if (tag === "textarea" || tag === "input") {
+          if (textareas.length < 8) textareas.push(record);
+        } else if (String(el.getAttribute("contenteditable") || "") === "true") {
+          editables += 1;
+        } else if (buttons.length < 12) {
+          record.label_kind = controlLabelKind(el);
+          buttons.push(record);
+        }
+      }
+      let items = [];
+      try { items = root.querySelectorAll ? root.querySelectorAll("li.chat-item") : []; } catch (e) { items = []; }
+      for (const item of items) {
+        if (isHidden(item)) chatHidden += 1;
+        else chatVisible += 1;
+        if (item.getAttribute("aria-selected") === "true") ariaSelected += 1;
+        const current = item.getAttribute("aria-current");
+        if (current === "true" || current === "page") ariaCurrent += 1;
+      }
+    }
+    return {
+      textareas, buttons, editables, password_skipped: passwordSkipped,
+      chat_items_visible: chatVisible, chat_items_hidden: chatHidden,
+      aria_selected_true: ariaSelected, aria_current_true: ariaCurrent
+    };
+  };
   const buildReport = (firstPass, secondPass) => {
     return {
     nodes,
@@ -667,6 +737,7 @@ _EXPORT_JS = """
       chat_item_counts_as_message_region: false
     },
     message_preflight: summarize(secondPass, comparePasses(firstPass, secondPass)),
+    composer_probe: composerProbe(),
     value_assessment: { groups, shell_ids: shell }
   };
   };
@@ -971,6 +1042,100 @@ def _clean_preflight(raw: Any) -> dict[str, Any]:
         "body_retained": False,
         "values_included": False,
         "production_mapping_validated": False,
+        "text_merge_applied": False,
+    }
+
+
+def _clean_controls(raw: Any, cap: int) -> list[dict[str, Any]]:
+    cleaned = []
+    if not isinstance(raw, list):
+        return cleaned
+    for item in raw:
+        if not isinstance(item, dict) or len(cleaned) >= cap:
+            continue
+        classes = [token for token in item.get("classes") or [] if isinstance(token, str) and _SAFE_CLASS.fullmatch(token)]
+        names = [
+            name
+            for name in item.get("attr_names") or []
+            if isinstance(name, str) and _ATTR_NAME.fullmatch(name) and name not in {"value", "placeholder"}
+        ]
+        label = item.get("label_kind")
+        cleaned.append(
+            {
+                "tag": item.get("tag") if item.get("tag") in {"textarea", "input", "button"} else "other",
+                "classes": classes[:4],
+                "disabled": item.get("disabled") is True,
+                "read_only": item.get("read_only") is True,
+                "hidden": item.get("hidden") is True,
+                "in_message_region": item.get("in_message_region") is True,
+                "attr_names": names[:8],
+                "label_kind": label if label in {"send", "other_redacted"} else "other_redacted",
+            }
+        )
+    return cleaned
+
+
+def _page_acceptance(preflight: dict[str, Any], raw_probe: Any) -> dict[str, Any]:
+    probe = raw_probe if isinstance(raw_probe, dict) else {}
+    textareas = _clean_controls(probe.get("textareas"), 8)
+    buttons = _clean_controls(probe.get("buttons"), 12)
+    usable_inputs = [
+        item for item in textareas if not item["hidden"] and not item["disabled"] and not item["read_only"]
+    ]
+    send_buttons = [
+        item for item in buttons if item["label_kind"] == "send" and not item["hidden"] and not item["disabled"]
+    ]
+    selected = _clean_int(probe.get("aria_selected_true"))
+    current = _clean_int(probe.get("aria_current_true"))
+    if selected == 1 or current == 1:
+        binding = "single_selection_attribute_unbound"
+    elif selected > 1 or current > 1:
+        binding = "selection_attribute_ambiguous"
+    else:
+        binding = "unproven_no_selection_attribute"
+    buyer = preflight.get("buyer_item") if isinstance(preflight.get("buyer_item"), dict) else {}
+    inside = _clean_int(buyer.get("inside_merchant_message"))
+    absent = _clean_int(buyer.get("absent"))
+    visible = _clean_int(preflight.get("visible_rows"))
+    checks = []
+    if binding != "single_selection_attribute_unbound":
+        checks.append("请只看左侧当前打开的那一行是否高亮。不要复制昵称、id 或正文。")
+    if visible and inside and absent:
+        checks.append("请只回答：你确知的一条买家气泡和一条商家气泡，是否正好对应 buyer-item 的有无。不要粘贴正文。")
+    elif visible and not inside:
+        checks.append("这一屏的消息行没有 buyer-item 结构差。请换一条只有买家发言的测试会话后再诊断，不要粘贴内容。")
+    return {
+        "conversation_binding": binding,
+        "conversation_bound_to_message_region": False,
+        "chat_items_visible": _clean_int(probe.get("chat_items_visible")),
+        "chat_items_hidden": _clean_int(probe.get("chat_items_hidden")),
+        "aria_selected_true": selected,
+        "aria_current_true": current,
+        "direction_evidence": "insufficient_name_not_used",
+        "direction_split": {
+            "mark_inside_wrapper": inside,
+            "rows_without_mark": absent,
+        },
+        "time_evidence": preflight.get("time_evidence") if preflight.get("time_evidence") in _PREFLIGHT_TIME else "absent",
+        "time_shapes": preflight.get("time_shapes") if isinstance(preflight.get("time_shapes"), dict) else {},
+        "rows_with_adjacent_date_header": _clean_int(preflight.get("rows_with_adjacent_date_header")),
+        "can_treat_time_as_message_time": False,
+        "reply_evidence": "read_unknown",
+        "read_mark_rows": _clean_int(preflight.get("read_mark_rows")),
+        "same_text_different_id_rows": _clean_int(preflight.get("same_text_different_id_rows")),
+        "text_merge_applied": False,
+        "inputs": textareas,
+        "buttons": buttons,
+        "usable_input_count": len(usable_inputs),
+        "send_label_button_count": len(send_buttons),
+        "contenteditable_count": _clean_int(probe.get("editables")),
+        "password_inputs_skipped": _clean_int(probe.get("password_skipped")),
+        "official_composer_verified": False,
+        "values_read": False,
+        "controls_activated": False,
+        "human_checks": checks,
+        "production_send_allowed": False,
+        "production_mapping_validated": False,
     }
 
 
@@ -994,6 +1159,7 @@ def export_rendered_dom(page: Any, *, timeout_seconds: float = 2.0) -> dict[str,
     report["value_assessment"] = _value_decisions(raw.get("value_assessment"))
     _apply_scope(report, raw)
     report["message_preflight"] = _clean_preflight(raw.get("message_preflight"))
+    report["page_acceptance"] = _page_acceptance(report["message_preflight"], raw.get("composer_probe"))
     preflight = report["message_preflight"]
     if (
         preflight.get("visible_rows", 0) > 0

@@ -162,9 +162,23 @@ def _normalize(text: str) -> str:
     return " ".join(text.split())
 
 
-def dedupe_key(conversation: str, text: str) -> str:
-    material = conversation + "\n" + _normalize(text)
+def identity_key(conversation: str, message_id: str) -> str:
+    """Stable handle for one row id. Same text with another id is a different key."""
+    material = conversation + "\n" + message_id
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def text_collision_count(messages: list[dict[str, Any]]) -> int:
+    groups: dict[str, set[str]] = {}
+    for item in messages:
+        if item.get("hidden") is True or item.get("direction") != "buyer":
+            continue
+        body = _normalize(str(item.get("body") or ""))
+        message_id = str(item.get("id") or "")
+        if not body or not message_id:
+            continue
+        groups.setdefault(body, set()).add(message_id)
+    return sum(len(ids) for ids in groups.values() if len(ids) > 1)
 
 
 class LoopbackGenerator:
@@ -285,6 +299,7 @@ def _result(status: str, **extra: Any) -> dict[str, Any]:
         "routine_is_sync_generator": False,
         "buyer_body_retained": False,
         "composer_commits": 0,
+        "text_merge_applied": False,
     }
     report.update(extra)
     return report
@@ -379,41 +394,59 @@ def run_simulated_cycle(
     conversation = str(snapshot.get("open_conversation") or "")
     messages = [item for item in snapshot.get("messages") or [] if isinstance(item, dict)]
     visible = [item for item in messages if item.get("hidden") is not True]
-    seen_text: set[str] = set()
+    collisions = text_collision_count(visible)
+    baseline_flag = "baseline_ready:" + hashlib.sha256(conversation.encode("utf-8")).hexdigest()
+    if store.get_meta(baseline_flag) != "1":
+        for item in visible:
+            if item.get("direction") != "buyer":
+                continue
+            message_id = str(item.get("id") or "")
+            if not message_id:
+                continue
+            store.insert_reply_attempt(
+                identity_key(conversation, message_id),
+                conversation,
+                "baseline_held",
+                "cold_start",
+            )
+        store.set_meta(baseline_flag, "1")
+        return _result(
+            "baseline_established",
+            simulated_controls_used=False,
+            conversation_bound=True,
+            text_collision_count=collisions,
+            text_merge_applied=False,
+            new_messages_sent=0,
+        )
     chosen: dict[str, Any] | None = None
     chosen_key = ""
-    deduped = 0
     for index, item in enumerate(visible):
         if item.get("direction") != "buyer":
             continue
         body = _normalize(str(item.get("body") or ""))
-        if not body or not str(item.get("id") or ""):
+        message_id = str(item.get("id") or "")
+        if not body or not message_id:
             continue
-        key = dedupe_key(conversation, body)
+        key = identity_key(conversation, message_id)
         if store.get_reply_attempt(key) is not None:
-            continue
-        if key in seen_text:
-            deduped += 1
             continue
         if _already_replied(visible, index):
             store.insert_reply_attempt(key, conversation, "held_already_replied", "later_reply_present")
-            seen_text.add(key)
             continue
         decision = buyer_policy(body)
         if decision != "ordinary":
             store.insert_reply_attempt(key, conversation, decision, "policy")
-            seen_text.add(key)
             continue
         if chosen is None:
             chosen = item
             chosen_key = key
-            seen_text.add(key)
     if chosen is None:
         return _result(
             "no_eligible_buyer_message",
             simulated_controls_used=False,
             conversation_bound=True,
-            deduped_same_text_count=deduped,
+            text_collision_count=collisions,
+            text_merge_applied=False,
         )
     try:
         generated = generator.generate(str(chosen.get("body") or ""))
@@ -422,7 +455,8 @@ def run_simulated_cycle(
             exc.code,
             simulated_controls_used=False,
             generator_transport=generator.transport_label,
-            deduped_same_text_count=deduped,
+            text_collision_count=collisions,
+            text_merge_applied=False,
         )
     reply = present_simulated(generated)
     if not output_allowed(reply):
@@ -430,7 +464,8 @@ def run_simulated_cycle(
         return _result(
             "ollama_output_rejected",
             generator_transport=generator.transport_label,
-            deduped_same_text_count=deduped,
+            text_collision_count=collisions,
+            text_merge_applied=False,
         )
     try:
         again = _read(page)
@@ -438,19 +473,48 @@ def run_simulated_cycle(
         return _result(
             "refused_read_failed",
             generator_transport=generator.transport_label,
-            deduped_same_text_count=deduped,
+            text_collision_count=collisions,
+            text_merge_applied=False,
         )
     if _binding_problem(again) or str(again.get("open_conversation") or "") != conversation:
         return _result(
             "refused_conversation_changed",
             generator_transport=generator.transport_label,
-            deduped_same_text_count=deduped,
+            text_collision_count=collisions,
+            text_merge_applied=False,
+        )
+    again_visible = [
+        item
+        for item in again.get("messages") or []
+        if isinstance(item, dict) and item.get("hidden") is not True
+    ]
+    chosen_id = str(chosen.get("id") or "")
+    still_there = False
+    for index, item in enumerate(again_visible):
+        if str(item.get("id") or "") != chosen_id or item.get("direction") != "buyer":
+            continue
+        still_there = True
+        if _already_replied(again_visible, index):
+            store.insert_reply_attempt(chosen_key, conversation, "held_already_replied", "changed_before_commit")
+            return _result(
+                "refused_replied_before_commit",
+                generator_transport=generator.transport_label,
+                text_collision_count=collisions,
+                text_merge_applied=False,
+            )
+    if not still_there:
+        return _result(
+            "refused_message_missing",
+            generator_transport=generator.transport_label,
+            text_collision_count=collisions,
+            text_merge_applied=False,
         )
     if not store.insert_reply_attempt(chosen_key, conversation, "committing", "sim_only"):
         return _result(
             "already_recorded",
             generator_transport=generator.transport_label,
-            deduped_same_text_count=deduped,
+            text_collision_count=collisions,
+            text_merge_applied=False,
         )
     page.locator("#sim-composer").fill(reply)
     page.locator("#sim-send").click()
@@ -469,7 +533,8 @@ def run_simulated_cycle(
             model=VERIFIED_MODEL,
             num_predict=NUM_PREDICT,
             resend_allowed=False,
-            deduped_same_text_count=deduped,
+            text_collision_count=collisions,
+            text_merge_applied=False,
         )
     store.update_reply_attempt(chosen_key, "simulated_sent", "sim_receipt")
     _note_commit(store, now)
@@ -482,5 +547,116 @@ def run_simulated_cycle(
         num_predict=NUM_PREDICT,
         resend_allowed=False,
         synthetic_reply=reply,
-        deduped_same_text_count=deduped,
+        text_collision_count=collisions,
+        text_merge_applied=False,
     )
+
+
+_SIM_PAGE = """<!DOCTYPE html><html data-simulated-inbox="true"><body
+ data-page-state="inbox" data-open-conversation="conv-sim-1">
+<div class="content-box" data-sim-conversation="conv-sim-1">
+<li class="onemsg" id="hist-sim" data-sim-direction="buyer"><p class="msg-content-box">【模拟】你好，在吗</p></li>
+<li class="onemsg" id="new-sim" data-sim-direction="buyer" data-sim-reveal="new" hidden><p class="msg-content-box">【模拟】你好，在吗</p></li>
+</div>
+<textarea id="sim-composer" data-sim-conversation="conv-sim-1"></textarea>
+<button type="button" id="sim-send">发送</button>
+<script>
+window.__sendClicks = 0;
+document.querySelector("#sim-send").addEventListener("click", () => {
+  window.__sendClicks += 1;
+  const text = document.querySelector("#sim-composer").value;
+  const item = document.createElement("li");
+  item.className = "sim-outgoing onemsg";
+  item.setAttribute("data-receipt", "sent");
+  item.setAttribute("data-sim-direction", "merchant");
+  item.textContent = text;
+  document.querySelector(".content-box").appendChild(item);
+});
+</script></body></html>
+"""
+
+_REVEAL_JS = """
+() => {
+  const node = document.querySelector("[data-sim-reveal='new']");
+  if (!node) return false;
+  node.hidden = false;
+  return true;
+}
+"""
+
+
+def run_local_ollama_sim() -> dict[str, Any]:
+    """One isolated localhost profile. Uses this machine's 127.0.0.1:11434, not an injected double."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from tempfile import TemporaryDirectory
+
+    from inbox_collector.browser_session import DedicatedBrowser
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            body = _SIM_PAGE.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, fmt: str, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = int(server.server_address[1])
+    browser = None
+    store: Store | None = None
+    try:
+        with TemporaryDirectory() as tmp:
+            root = __import__("pathlib").Path(tmp)
+            profile = root / "temp-profile"
+            store = Store(root / "sim-data")
+            browser = DedicatedBrowser(profile)
+            browser.start()
+            browser.page.goto(f"http://127.0.0.1:{port}/sim.html")
+            generator = LoopbackGenerator(urllib_loopback_transport, transport_label="urllib_loopback")
+            now = __import__("time").time()
+            baseline = run_simulated_cycle(browser.page, store, generator, min_interval=0, max_per_hour=3, now=now)
+            if baseline.get("status") != "baseline_established":
+                baseline["isolated_profile"] = True
+                baseline["merchant_profile_used"] = False
+                baseline["resend_allowed"] = False
+                return baseline
+            if browser.page.evaluate(_REVEAL_JS) is not True:
+                return _result("refused_sim_reveal_missing", isolated_profile=True, merchant_profile_used=False)
+            outcome = run_simulated_cycle(
+                browser.page,
+                store,
+                generator,
+                min_interval=0,
+                max_per_hour=3,
+                now=now + 1,
+            )
+            outcome["baseline_status"] = "baseline_established"
+            outcome["isolated_profile"] = True
+            outcome["merchant_profile_used"] = False
+            outcome["profile_retained"] = False
+            outcome["generator_transport"] = "urllib_loopback"
+            outcome["mac_ollama_contacted"] = False
+            outcome["customer_service_quality_verified"] = False
+            outcome["resend_allowed"] = False
+            if outcome.get("status") != "simulated_sent":
+                return outcome
+            clicks = browser.page.evaluate("() => window.__sendClicks")
+            outcome["composer_commits_seen"] = clicks if isinstance(clicks, int) else 0
+            if outcome["composer_commits_seen"] != 1:
+                outcome["status"] = "paused_uncertain"
+                outcome["resend_allowed"] = False
+            return outcome
+    finally:
+        if browser is not None:
+            browser.close()
+        if store is not None:
+            store.close()
+        server.shutdown()
+        server.server_close()

@@ -115,12 +115,21 @@ class AutoReplyGateTest(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             store = Store(__import__("pathlib").Path(tmp))
             try:
-                report = run_simulated_cycle(
+                first = run_simulated_cycle(
                     page,
                     store,
                     LoopbackGenerator(transport, transport_label="injected_test_double"),
                     min_interval=0,
                     now=1,
+                )
+                self.assertEqual(first["status"], "baseline_established")
+                page.snapshot["messages"][0]["id"] = "m-2"
+                report = run_simulated_cycle(
+                    page,
+                    store,
+                    LoopbackGenerator(transport, transport_label="injected_test_double"),
+                    min_interval=0,
+                    now=2,
                 )
             finally:
                 store.close()
@@ -140,12 +149,22 @@ class AutoReplyGateTest(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             store = Store(__import__("pathlib").Path(tmp))
             try:
+                first = run_simulated_cycle(
+                    page,
+                    store,
+                    LoopbackGenerator(lambda *args: (200, TAGS), transport_label="injected_test_double"),
+                    min_interval=0,
+                    now=1,
+                )
+                self.assertEqual(first["status"], "baseline_established")
+                self.assertEqual(paths, [])
+                page.snapshot["messages"][0]["id"] = "m-2"
                 report = run_simulated_cycle(
                     page,
                     store,
                     LoopbackGenerator(transport, transport_label="injected_test_double"),
                     min_interval=0,
-                    now=1,
+                    now=2,
                 )
             finally:
                 store.close()

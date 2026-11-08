@@ -652,6 +652,9 @@ class BrowserE2ETest(unittest.TestCase):
                 "<li class='clearfix onemsg' id='row-a' hidden>"
                 "<div class='merchantMessage'><p class='msg-content-box'>隐藏重复</p></div></li>"
                 "</div>"
+                "<textarea class='reply-editor'></textarea>"
+                "<button type='button'>发送</button>"
+                "<input type='password' value='hunter2'>"
             ),
             "same-text": (
                 "<div class='content-box'>"
@@ -697,6 +700,7 @@ class BrowserE2ETest(unittest.TestCase):
                 "row-a",
                 "id-alpha",
                 "id-beta",
+                "hunter2",
             ):
                 self.assertNotIn(secret, rendered, name)
             self.assertFalse(report["message_preflight"]["chat_item_counts_as_message_region"], name)
@@ -725,6 +729,20 @@ class BrowserE2ETest(unittest.TestCase):
         self.assertEqual(rows["id_stability"]["same_page_result"], "unchanged")
         self.assertEqual(rows["id_shapes"]["other_shape"], 2)
         self.assertEqual(findings["rows"]["reason"], "message_rows_observed_direction_time_reply_unconfirmed")
+        acceptance = findings["rows"]["page_acceptance"]
+        self.assertEqual(acceptance["conversation_binding"], "unproven_no_selection_attribute")
+        self.assertFalse(acceptance["conversation_bound_to_message_region"])
+        self.assertEqual(acceptance["direction_evidence"], "insufficient_name_not_used")
+        self.assertEqual(acceptance["direction_split"]["mark_inside_wrapper"], 1)
+        self.assertGreaterEqual(acceptance["direction_split"]["rows_without_mark"], 1)
+        self.assertEqual(acceptance["usable_input_count"], 1)
+        self.assertEqual(acceptance["send_label_button_count"], 1)
+        self.assertGreaterEqual(acceptance["password_inputs_skipped"], 1)
+        self.assertFalse(acceptance["official_composer_verified"])
+        self.assertFalse(acceptance["values_read"])
+        self.assertFalse(acceptance["controls_activated"])
+        self.assertFalse(acceptance["production_send_allowed"])
+        self.assertTrue(acceptance["human_checks"])
         same = findings["same-text"]["message_preflight"]
         self.assertEqual(same["same_text_different_id_rows"], 2)
         self.assertEqual(same["time_evidence"], "clock_without_date")
@@ -800,15 +818,32 @@ class BrowserE2ETest(unittest.TestCase):
         store = Store(self.data / "reply-store")
         self.addCleanup(store.close)
         generator = LoopbackGenerator(transport, transport_label="injected_test_double")
-        self.html_path.write_text(page_html(buyer), encoding="utf-8")
+        history = (
+            "<li class='onemsg' id='hist-1' data-sim-direction='buyer'>"
+            "<p class='msg-content-box'>【模拟】你好，在吗</p></li>"
+        )
+        self.html_path.write_text(page_html(history), encoding="utf-8")
         browser.page.goto(f"http://127.0.0.1:{self.port}/inbox.html")
-        first = run_simulated_cycle(browser.page, store, generator, min_interval=0, max_per_hour=3, now=1_700_000_000)
+        baseline = run_simulated_cycle(
+            browser.page, store, generator, min_interval=0, max_per_hour=3, now=1_700_000_000
+        )
+        self.assertEqual(baseline["status"], "baseline_established")
+        self.assertEqual(baseline["composer_commits"], 0)
+        self.assertFalse(baseline["text_merge_applied"])
+        self.assertEqual(calls, [])
+        self.html_path.write_text(page_html(history + buyer.replace("m-1", "new-1")), encoding="utf-8")
+        browser.page.goto(f"http://127.0.0.1:{self.port}/inbox.html")
+        first = run_simulated_cycle(
+            browser.page, store, generator, min_interval=0, max_per_hour=3, now=1_700_000_010
+        )
         self.assertEqual(first["status"], "simulated_sent")
         self.assertFalse(first["real_buyer_send"])
         self.assertFalse(first["production_send_allowed"])
         self.assertFalse(first["mac_ollama_contacted"])
         self.assertFalse(first["customer_service_quality_verified"])
         self.assertFalse(first["official_composer_verified"])
+        self.assertFalse(first["text_merge_applied"])
+        self.assertEqual(first["text_collision_count"], 2)
         self.assertEqual(first["generator_transport"], "injected_test_double")
         self.assertEqual(first["model"], "qwen-kefu:latest")
         self.assertEqual(first["num_predict"], 24)
@@ -820,7 +855,7 @@ class BrowserE2ETest(unittest.TestCase):
         self.assertIn("【模拟】您好，已收到。", browser.page.locator(".sim-outgoing").inner_text())
         browser.page.evaluate("() => document.querySelectorAll('.sim-outgoing').forEach((node) => node.remove())")
         second = run_simulated_cycle(
-            browser.page, store, generator, min_interval=0, max_per_hour=3, now=1_700_000_010
+            browser.page, store, generator, min_interval=0, max_per_hour=3, now=1_700_000_020
         )
         self.assertEqual(second["status"], "no_eligible_buyer_message")
         self.assertEqual(browser.page.evaluate("() => window.__sendClicks"), 1)
@@ -828,39 +863,63 @@ class BrowserE2ETest(unittest.TestCase):
 
         refund_store = Store(self.data / "refund-store")
         self.addCleanup(refund_store.close)
+        self.html_path.write_text(page_html(history), encoding="utf-8")
+        browser.page.goto(f"http://127.0.0.1:{self.port}/inbox.html")
+        self.assertEqual(
+            run_simulated_cycle(browser.page, refund_store, generator, min_interval=0, max_per_hour=3, now=20)[
+                "status"
+            ],
+            "baseline_established",
+        )
         before = len(calls)
         self.html_path.write_text(
             page_html(
-                "<li class='onemsg' id='refund-1' data-sim-direction='buyer'>"
+                history
+                + "<li class='onemsg' id='refund-1' data-sim-direction='buyer'>"
                 "<p class='msg-content-box'>【模拟】我要退款</p></li>"
             ),
             encoding="utf-8",
         )
         browser.page.goto(f"http://127.0.0.1:{self.port}/inbox.html")
-        refund = run_simulated_cycle(browser.page, refund_store, generator, min_interval=0, max_per_hour=3, now=20)
+        refund = run_simulated_cycle(browser.page, refund_store, generator, min_interval=0, max_per_hour=3, now=21)
         self.assertEqual(refund["status"], "no_eligible_buyer_message")
         self.assertEqual(len(calls), before)
         self.assertEqual(browser.page.evaluate("() => window.__sendClicks"), 0)
 
         dup_store = Store(self.data / "dup-store")
         self.addCleanup(dup_store.close)
-        self.html_path.write_text(
-            page_html(
-                "<li class='onemsg' id='id-a' data-sim-direction='buyer'>"
-                "<p class='msg-content-box'>【模拟】你好，相同问句</p></li>"
-                "<li class='onemsg' id='id-b' data-sim-direction='buyer'>"
-                "<p class='msg-content-box'>【模拟】你好，相同问句</p></li>"
-            ),
-            encoding="utf-8",
+        same = (
+            "<li class='onemsg' id='id-a' data-sim-direction='buyer'>"
+            "<p class='msg-content-box'>【模拟】你好，相同问句</p></li>"
+            "<li class='onemsg' id='id-b' data-sim-direction='buyer'>"
+            "<p class='msg-content-box'>【模拟】你好，相同问句</p></li>"
         )
+        self.html_path.write_text(page_html(history), encoding="utf-8")
         browser.page.goto(f"http://127.0.0.1:{self.port}/inbox.html")
-        dup = run_simulated_cycle(browser.page, dup_store, generator, min_interval=0, max_per_hour=3, now=30)
+        self.assertEqual(
+            run_simulated_cycle(browser.page, dup_store, generator, min_interval=0, max_per_hour=3, now=30)["status"],
+            "baseline_established",
+        )
+        self.html_path.write_text(page_html(history + same), encoding="utf-8")
+        browser.page.goto(f"http://127.0.0.1:{self.port}/inbox.html")
+        dup = run_simulated_cycle(browser.page, dup_store, generator, min_interval=0, max_per_hour=3, now=31)
         self.assertEqual(dup["status"], "simulated_sent")
-        self.assertEqual(dup["deduped_same_text_count"], 1)
+        self.assertFalse(dup["text_merge_applied"])
+        self.assertGreaterEqual(dup["text_collision_count"], 2)
         self.assertEqual(browser.page.evaluate("() => window.__sendClicks"), 1)
+        browser.page.evaluate("() => document.querySelectorAll('.sim-outgoing').forEach((node) => node.remove())")
+        dup_again = run_simulated_cycle(browser.page, dup_store, generator, min_interval=0, max_per_hour=3, now=32)
+        self.assertEqual(dup_again["status"], "simulated_sent")
+        self.assertEqual(browser.page.evaluate("() => window.__sendClicks"), 2)
 
         read_store = Store(self.data / "read-store")
         self.addCleanup(read_store.close)
+        self.html_path.write_text(page_html(history), encoding="utf-8")
+        browser.page.goto(f"http://127.0.0.1:{self.port}/inbox.html")
+        self.assertEqual(
+            run_simulated_cycle(browser.page, read_store, generator, min_interval=0, max_per_hour=3, now=40)["status"],
+            "baseline_established",
+        )
         self.html_path.write_text(
             page_html(
                 "<li class='onemsg' id='read-1' data-sim-direction='buyer'>"
@@ -870,15 +929,24 @@ class BrowserE2ETest(unittest.TestCase):
             encoding="utf-8",
         )
         browser.page.goto(f"http://127.0.0.1:{self.port}/inbox.html")
-        read_mark = run_simulated_cycle(browser.page, read_store, generator, min_interval=0, max_per_hour=3, now=40)
+        read_mark = run_simulated_cycle(browser.page, read_store, generator, min_interval=0, max_per_hour=3, now=41)
         self.assertEqual(read_mark["status"], "simulated_sent")
 
         replied_store = Store(self.data / "replied-store")
         self.addCleanup(replied_store.close)
+        self.html_path.write_text(page_html(history), encoding="utf-8")
+        browser.page.goto(f"http://127.0.0.1:{self.port}/inbox.html")
+        self.assertEqual(
+            run_simulated_cycle(browser.page, replied_store, generator, min_interval=0, max_per_hour=3, now=50)[
+                "status"
+            ],
+            "baseline_established",
+        )
         before = len(calls)
         self.html_path.write_text(
             page_html(
-                "<li class='onemsg' id='buyer-2' data-sim-direction='buyer'>"
+                history
+                + "<li class='onemsg' id='buyer-2' data-sim-direction='buyer'>"
                 "<p class='msg-content-box'>【模拟】你好</p></li>"
                 "<li class='onemsg' id='human-2' data-sim-direction='merchant' data-sim-reply='human'>"
                 "<p class='msg-content-box'>人工已经回复</p></li>"
@@ -886,20 +954,26 @@ class BrowserE2ETest(unittest.TestCase):
             encoding="utf-8",
         )
         browser.page.goto(f"http://127.0.0.1:{self.port}/inbox.html")
-        replied = run_simulated_cycle(browser.page, replied_store, generator, min_interval=0, max_per_hour=3, now=50)
+        replied = run_simulated_cycle(browser.page, replied_store, generator, min_interval=0, max_per_hour=3, now=51)
         self.assertEqual(replied["status"], "no_eligible_buyer_message")
         self.assertEqual(len(calls), before)
         self.assertEqual(browser.page.evaluate("() => window.__sendClicks"), 0)
 
         blind_store = Store(self.data / "blind-store")
         self.addCleanup(blind_store.close)
+        self.html_path.write_text(page_html(history), encoding="utf-8")
+        browser.page.goto(f"http://127.0.0.1:{self.port}/inbox.html")
+        self.assertEqual(
+            run_simulated_cycle(browser.page, blind_store, generator, min_interval=0, max_per_hour=3, now=60)["status"],
+            "baseline_established",
+        )
         self.html_path.write_text(page_html(buyer, receipt=False), encoding="utf-8")
         browser.page.goto(f"http://127.0.0.1:{self.port}/inbox.html")
-        uncertain = run_simulated_cycle(browser.page, blind_store, generator, min_interval=0, max_per_hour=3, now=60)
+        uncertain = run_simulated_cycle(browser.page, blind_store, generator, min_interval=0, max_per_hour=3, now=61)
         self.assertEqual(uncertain["status"], "paused_uncertain")
         self.assertFalse(uncertain["resend_allowed"])
         self.assertEqual(browser.page.evaluate("() => window.__sendClicks"), 1)
-        again = run_simulated_cycle(browser.page, blind_store, generator, min_interval=0, max_per_hour=3, now=70)
+        again = run_simulated_cycle(browser.page, blind_store, generator, min_interval=0, max_per_hour=3, now=62)
         self.assertEqual(again["status"], "refused_stop")
         self.assertEqual(browser.page.evaluate("() => window.__sendClicks"), 1)
 
@@ -913,6 +987,12 @@ class BrowserE2ETest(unittest.TestCase):
                 )
             return transport(method, path, body, timeout)
 
+        self.html_path.write_text(page_html(history), encoding="utf-8")
+        browser.page.goto(f"http://127.0.0.1:{self.port}/inbox.html")
+        self.assertEqual(
+            run_simulated_cycle(browser.page, shift_store, generator, min_interval=0, max_per_hour=3, now=80)["status"],
+            "baseline_established",
+        )
         self.html_path.write_text(page_html(buyer), encoding="utf-8")
         browser.page.goto(f"http://127.0.0.1:{self.port}/inbox.html")
         shifted = run_simulated_cycle(
@@ -921,7 +1001,7 @@ class BrowserE2ETest(unittest.TestCase):
             LoopbackGenerator(shifting, transport_label="injected_test_double"),
             min_interval=0,
             max_per_hour=3,
-            now=80,
+            now=81,
         )
         self.assertEqual(shifted["status"], "refused_conversation_changed")
         self.assertEqual(browser.page.evaluate("() => window.__sendClicks"), 0)
@@ -933,6 +1013,63 @@ class BrowserE2ETest(unittest.TestCase):
         captcha = run_simulated_cycle(browser.page, login_store, generator, min_interval=0, max_per_hour=3, now=90)
         self.assertEqual(captcha["status"], "refused_page_captcha")
         self.assertEqual(browser.page.evaluate("() => window.__sendClicks"), 0)
+
+    def test_auto_reply_sim_command_talks_to_loopback_not_a_double(self) -> None:
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        from inbox_collector.auto_reply import run_local_ollama_sim
+
+        seen: list[object] = []
+
+        class _Stub(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                seen.append(("GET", self.path.split("?", 1)[0]))
+                body = json.dumps(
+                    {"models": [{"name": "qwen-kefu:latest", "size": 1117321521, "details": {"family": "qwen2"}}]}
+                ).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers.get("Content-Length") or "0")
+                payload = json.loads(self.rfile.read(length).decode())
+                seen.append((self.path, payload.get("model"), payload.get("options", {}).get("num_predict")))
+                body = json.dumps({"response": "您好，已收到。", "done": True, "done_reason": "stop"}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, fmt: str, *args: object) -> None:
+                return
+
+        try:
+            stub = ThreadingHTTPServer(("127.0.0.1", 11434), _Stub)
+        except OSError as exc:
+            self.fail(f"127.0.0.1:11434 is not available for the loopback integration test: {exc}")
+        worker = threading.Thread(target=stub.serve_forever, daemon=True)
+        worker.start()
+        self.addCleanup(stub.shutdown)
+        self.addCleanup(stub.server_close)
+        report = run_local_ollama_sim()
+        self.assertEqual(report["status"], "simulated_sent")
+        self.assertEqual(report["generator_transport"], "urllib_loopback")
+        self.assertFalse(report["mac_ollama_contacted"])
+        self.assertFalse(report["customer_service_quality_verified"])
+        self.assertFalse(report["real_buyer_send"])
+        self.assertFalse(report["production_send_allowed"])
+        self.assertFalse(report["merchant_profile_used"])
+        self.assertTrue(report["isolated_profile"])
+        self.assertFalse(report["text_merge_applied"])
+        self.assertEqual(report["composer_commits_seen"], 1)
+        self.assertEqual(report["text_collision_count"], 2)
+        self.assertIn(("GET", "/api/tags"), seen)
+        self.assertIn(("/api/generate", "qwen-kefu:latest", 24), seen)
 
     def test_diagnose_uses_the_open_page_without_navigation(self) -> None:
         from inbox_collector.dom_diagnose import export_rendered_dom, service_diagnose_request

@@ -54,7 +54,21 @@ Profile 里会留下登录态，只放在本机，不要复制、同步或提交
 
 导出的仍是标签名、属性名、安全 class、frame 计数和来源分类、覆盖范围、真实截断原因，以及原来的值形状分类。`li.chat-item` 只算会话列表，不能单独让 `message_region` 为 true。消息 preflight 只在 `content-box` 里的 `li.onemsg` 上关联子孙时间节点和邻接日期头，`merchantMessage` / `buyer-item` 只记结构、不从名字判断方向，`isread` 只记 `read_unknown`。同一页会做两次观察比较可见行 id，但同页稳定不等于跨重启稳定。原始 id、正文、身份、日期原文和 URL 不会写出。生产 mapping 仍是 false。
 
-自动回复默认关闭。`auto-reply-gates` 永远报告 `production_send_allowed: false`。本地模拟链路只在 `127.0.0.1` / `localhost` 的模拟页上，用已核验的公开 Ollama 契约（`http://127.0.0.1:11434`，模型 `qwen-kefu:latest`，`num_predict` 24，45 秒，`done_reason=stop`）生成一句普通问候。这不是客服质量验证，也不是买家发送。云端测试注入替身传输，不连接 Mac。退款、改价、补偿，以及没有资料的价格、物流、规格、安装、售后，不会自动发。发送前会再核当前会话；没有 DOM 回执就暂停且不重发。官方页面的输入框和发送按钮仍未验证。
+下一次实页验收只读，不点输入框、不发送。在已经打开的 login-prep 旁执行：
+
+```bash
+python -m inbox_collector diagnose-dom --data-dir data --timeout-seconds 5 --summary
+```
+
+看 `page_acceptance`。`official_composer_verified` 必须仍是 false。`usable_input_count` 和 `send_label_button_count` 只说明有没有可见且未禁用的输入框，以及按钮文字是不是恰好「发送」。`conversation_binding` 没有共享身份时就是未绑定。`direction_evidence` 不会因为 `buyer-item` 这个名字变成买家。`human_checks` 里若要求看一条已知买家气泡和一条商家气泡，只回答结构是否对应，不要粘贴正文。
+
+本机 Ollama 模拟发送用一条独立命令。它会自建临时浏览器 profile 和临时页面，只访问 `http://127.0.0.1:11434` 的 `qwen-kefu:latest`，不碰已经登录的 Chrome：
+
+```bash
+python -m inbox_collector auto-reply-sim
+```
+
+通过时 `status` 是 `simulated_sent`，`generator_transport` 是 `urllib_loopback`，`composer_commits_seen` 是 1，`real_buyer_send` 和 `customer_service_quality_verified` 都是 false。冷启动先把当时可见的行记为历史，不回复；同文不同 id 的新行仍会各算一条。没有回执则 `paused_uncertain`，不会再发。`production_send_allowed` 仍是 false。
 
 一次采样不能证明 id 换消息后仍稳定，所以 `can_use_for_dedupe` 保持 false。格式说明不会被当成时间；形状像时间也只记为需要人工确认含义，`can_treat_time_as_message_time` 保持 false。其它文字只记为 `other_redacted`。隐藏行、重复 id、或 `aria-rowcount` 大于当前渲染行数时，证据记为不充分。结果里的 `human_checks` 是最低必要的人工核对，不是采集成功。生产 mapping 仍是 false。
 

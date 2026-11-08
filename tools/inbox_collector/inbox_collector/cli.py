@@ -123,7 +123,54 @@ def cmd_validate_mapping(path: Path) -> int:
     return 0 if local_ok or merchant_ok else 2
 
 
-def cmd_diagnose_dom(data_dir: Path, timeout_seconds: float) -> int:
+def _diagnose_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    preflight = payload.get("message_preflight") if isinstance(payload.get("message_preflight"), dict) else {}
+    frames = payload.get("frames") if isinstance(payload.get("frames"), dict) else {}
+    coverage = payload.get("coverage") if isinstance(payload.get("coverage"), dict) else {}
+    kept = {
+        key: preflight.get(key)
+        for key in (
+            "visible_rows",
+            "hidden_rows",
+            "merchant_message",
+            "buyer_item",
+            "direction_evidence",
+            "time_evidence",
+            "time_shapes",
+            "rows_with_adjacent_date_header",
+            "read_mark_rows",
+            "reply_evidence",
+            "same_text_different_id_rows",
+            "id_stability",
+            "text_merge_applied",
+            "can_treat_time_as_message_time",
+            "production_mapping_validated",
+        )
+    }
+    return {
+        "status": payload.get("status"),
+        "reason": payload.get("reason"),
+        "page_acceptance": payload.get("page_acceptance"),
+        "message_preflight": kept,
+        "frames": {
+            "seen": frames.get("seen"),
+            "entered": frames.get("entered"),
+            "skipped": frames.get("skipped"),
+            "by_category": frames.get("by_category"),
+        },
+        "coverage": {
+            "incomplete": coverage.get("incomplete"),
+            "reasons": coverage.get("reasons"),
+            "top_page": coverage.get("top_page"),
+            "max_depth_reached": coverage.get("max_depth_reached"),
+        },
+        "production_mapping_validated": False,
+        "production_send_allowed": False,
+        "nodes_omitted": True,
+    }
+
+
+def cmd_diagnose_dom(data_dir: Path, timeout_seconds: float, *, summary: bool = False) -> int:
     """Ask the already-running login-prep process. Never starts a browser."""
     from inbox_collector.dom_diagnose import wait_for_diagnose_result
 
@@ -132,6 +179,8 @@ def cmd_diagnose_dom(data_dir: Path, timeout_seconds: float) -> int:
         return 2
     data_dir.mkdir(parents=True, exist_ok=True)
     payload = wait_for_diagnose_result(data_dir, timeout_seconds=timeout_seconds)
+    if summary and isinstance(payload, dict) and payload.get("status") != "diagnostic_error":
+        payload = _diagnose_summary(payload)
     _print(payload)
     return 0 if payload.get("status") not in {None, "diagnostic_error"} else 2
 
@@ -344,6 +393,7 @@ def build_parser() -> argparse.ArgumentParser:
     diagnose = sub.add_parser("diagnose-dom")
     diagnose.add_argument("--data-dir", type=Path, required=True)
     diagnose.add_argument("--timeout-seconds", type=float, default=2.0)
+    diagnose.add_argument("--summary", action="store_true")
 
     routine_setup = sub.add_parser("routine-setup")
     routine_setup.add_argument("--url", required=True)
@@ -351,6 +401,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     gates = sub.add_parser("auto-reply-gates")
     gates.add_argument("--config", type=Path, required=True)
+
+    sub.add_parser("auto-reply-sim")
     return parser
 
 
@@ -384,7 +436,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "login-prep":
         return cmd_login_prep(args.config)
     if args.command == "diagnose-dom":
-        return cmd_diagnose_dom(args.data_dir, args.timeout_seconds)
+        return cmd_diagnose_dom(args.data_dir, args.timeout_seconds, summary=args.summary)
+    if args.command == "auto-reply-sim":
+        from inbox_collector.auto_reply import run_local_ollama_sim
+
+        report = run_local_ollama_sim()
+        _print(report)
+        return 0 if report.get("status") == "simulated_sent" and report.get("real_buyer_send") is False else 2
     if args.command == "routine-setup":
         return cmd_routine_setup(args.url, args.config)
     if args.command == "auto-reply-gates":
