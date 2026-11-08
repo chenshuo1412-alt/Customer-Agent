@@ -77,6 +77,14 @@ CREATE TABLE IF NOT EXISTS run_log (
     reason TEXT NOT NULL,
     at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS reply_attempts (
+    dedupe_key TEXT PRIMARY KEY,
+    conversation_key TEXT NOT NULL,
+    status TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -375,6 +383,30 @@ class Store:
     def open_alert_count(self) -> int:
         row = self.conn.execute("SELECT COUNT(*) AS n FROM alerts WHERE state='open'").fetchone()
         return int(row["n"])
+
+    def get_reply_attempt(self, dedupe_key: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM reply_attempts WHERE dedupe_key=?",
+            (dedupe_key,),
+        ).fetchone()
+
+    def insert_reply_attempt(self, dedupe_key: str, conversation_key: str, status: str, detail: str) -> bool:
+        now = utc_now()
+        cursor = self.conn.execute(
+            """
+            INSERT INTO reply_attempts(dedupe_key, conversation_key, status, detail, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(dedupe_key) DO NOTHING
+            """,
+            (dedupe_key, conversation_key, status, detail, now, now),
+        )
+        return cursor.rowcount == 1
+
+    def update_reply_attempt(self, dedupe_key: str, status: str, detail: str) -> None:
+        self.conn.execute(
+            "UPDATE reply_attempts SET status=?, detail=?, updated_at=? WHERE dedupe_key=?",
+            (status, detail, utc_now(), dedupe_key),
+        )
 
     def alert_count(self, code: str) -> int:
         row = self.conn.execute("SELECT count FROM alerts WHERE code=?", (code,)).fetchone()

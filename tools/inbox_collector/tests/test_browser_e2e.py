@@ -570,8 +570,11 @@ class BrowserE2ETest(unittest.TestCase):
         self.assertTrue(framed["reached"])
         self.assertTrue(framed["in_frame"])
         self.assertFalse(framed["hidden_only"])
-        self.assertEqual(set(framed["landmarks"]), {"content-box", "reply-box", "chat-item"})
+        self.assertEqual(set(framed["landmarks"]), {"content-box", "reply-box"})
+        self.assertNotIn("chat-item", framed["landmarks"])
+        self.assertFalse(framed["chat_item_counts_as_message_region"])
         self.assertIn("chat-list-box", framed["conversation_list_landmarks"])
+        self.assertIn("chat-item", framed["conversation_list_landmarks"])
         self.assertIn("loadMoreMsg", framed["history_controls"])
         self.assertGreaterEqual(framed["max_landmark_depth"], 20)
         self.assertGreaterEqual(findings["framed"]["frames"]["entered"], 2)
@@ -617,7 +620,8 @@ class BrowserE2ETest(unittest.TestCase):
         self.assertTrue(findings["sample-depth"]["message_region"]["reached"])
         self.assertIn("sample_depth", findings["sample-depth"]["coverage"]["reasons"])
         self.assertTrue(findings["sample-depth"]["truncated"])
-        self.assertIn("chat-item", findings["sample-depth"]["message_region"]["landmarks"])
+        self.assertIn("content-box", findings["sample-depth"]["message_region"]["landmarks"])
+        self.assertNotIn("chat-item", findings["sample-depth"]["message_region"]["landmarks"])
         self.assertTrue(findings["depth-limit"]["message_region"]["reached"])
         self.assertIn("depth_limit", findings["depth-limit"]["coverage"]["reasons"])
         self.assertTrue(findings["depth-limit"]["truncated"])
@@ -627,6 +631,308 @@ class BrowserE2ETest(unittest.TestCase):
         self.assertFalse(login["message_region"]["reached"])
         self.assertEqual(login["status"], "coverage_incomplete")
         self.assertEqual(login["frames"]["entered"], 0)
+
+    def test_message_preflight_associates_rows_without_raw_values(self) -> None:
+        from inbox_collector.browser_session import DedicatedBrowser
+        from inbox_collector.dom_diagnose import export_rendered_dom
+
+        hidden_items = "".join("<li class='chat-item' hidden></li>" for _ in range(6))
+        pages = {
+            "rows": (
+                f"<ul class='chat-list-box'>{hidden_items}</ul>"
+                "<div class='content-box'>"
+                "<div class='day-head'>2026年11月8日</div>"
+                "<li class='clearfix onemsg' id='row-a'>"
+                "<div class='merchantMessage'><div class='buyer-item'>"
+                "<p class='msg-content-box'>普通咨询甲</p></div>"
+                "<p class='message-time'>09:01</p></div></li>"
+                "<li class='clearfix onemsg' id='row-b'>"
+                "<div class='merchantMessage'><p class='msg-content-box'>普通咨询乙</p>"
+                "<p class='message-time'>09:02</p><div class='cs-item isread'></div></div></li>"
+                "<li class='clearfix onemsg' id='row-a' hidden>"
+                "<div class='merchantMessage'><p class='msg-content-box'>隐藏重复</p></div></li>"
+                "</div>"
+            ),
+            "same-text": (
+                "<div class='content-box'>"
+                "<li class='onemsg' id='id-alpha'><div class='merchantMessage'>"
+                "<p class='msg-content-box'>相同的模拟问句</p><p class='message-time'>13:32</p></div></li>"
+                "<li class='onemsg' id='id-beta'><div class='merchantMessage'>"
+                "<p class='msg-content-box'>相同的模拟问句</p><p class='message-time'>13:33</p></div></li>"
+                "</div>"
+            ),
+            "clock": (
+                "<div class='content-box'><li class='onemsg' id='clock-1'><div class='merchantMessage'>"
+                "<p class='message-time'>09:15</p></div></li>"
+                "<li class='onemsg' id='clock-2'><div class='merchantMessage'>"
+                "<p class='message-time'>09:16</p></div></li></div>"
+            ),
+            "dated": (
+                "<div class='content-box'><li class='onemsg' id='dated-1'><div class='merchantMessage'>"
+                "<p class='message-time'>2026-11-08 09:01</p></div></li>"
+                "<li class='onemsg' id='dated-2'><div class='merchantMessage'>"
+                "<p class='message-time'>2026-11-08 09:02</p></div></li></div>"
+            ),
+            "list-only": f"<ul class='chat-list-box'>{hidden_items}</ul>",
+        }
+        browser = DedicatedBrowser(self.data / "preflight-profile")
+        browser.start()
+        self.addCleanup(browser.close)
+        findings = {}
+        for name, inner in pages.items():
+            self.html_path.write_text(f"<!DOCTYPE html><body>{inner}</body></html>", encoding="utf-8")
+            browser.page.goto(f"http://127.0.0.1:{self.port}/inbox.html")
+            report = export_rendered_dom(browser.page, timeout_seconds=5)
+            rendered = json.dumps(report, ensure_ascii=False)
+            for secret in (
+                "2026年11月8日",
+                "2026-11-08",
+                "09:01",
+                "09:02",
+                "09:15",
+                "13:32",
+                "普通咨询甲",
+                "相同的模拟问句",
+                "隐藏重复",
+                "row-a",
+                "id-alpha",
+                "id-beta",
+            ):
+                self.assertNotIn(secret, rendered, name)
+            self.assertFalse(report["message_preflight"]["chat_item_counts_as_message_region"], name)
+            self.assertFalse(report["message_region"]["chat_item_counts_as_message_region"], name)
+            self.assertEqual(report["message_preflight"]["direction_evidence"], "insufficient_name_not_used", name)
+            self.assertEqual(report["message_preflight"]["reply_evidence"], "read_unknown", name)
+            self.assertFalse(report["message_preflight"]["can_treat_time_as_message_time"], name)
+            self.assertFalse(report["message_preflight"]["id_stability"]["can_use_for_dedupe"], name)
+            self.assertEqual(report["message_preflight"]["id_stability"]["cross_restart"], "unproven", name)
+            self.assertFalse(report["production_mapping_validated"], name)
+            findings[name] = report
+        rows = findings["rows"]["message_preflight"]
+        self.assertTrue(findings["rows"]["message_region"]["reached"])
+        self.assertNotIn("chat-item", findings["rows"]["message_region"]["landmarks"])
+        self.assertIn("chat-item", findings["rows"]["message_region"]["conversation_list_landmarks"])
+        self.assertEqual(rows["visible_rows"], 2)
+        self.assertGreaterEqual(rows["hidden_rows"], 1)
+        self.assertEqual(rows["merchant_message"]["relation"], "covers_every_visible_row")
+        self.assertFalse(rows["merchant_message"]["used_as_direction"])
+        self.assertEqual(rows["buyer_item"]["inside_merchant_message"], 1)
+        self.assertEqual(rows["time_evidence"], "clock_with_adjacent_date_header")
+        self.assertGreaterEqual(rows["read_mark_rows"], 1)
+        self.assertGreaterEqual(rows["hidden_id_collides_with_visible"], 1)
+        self.assertEqual(rows["id_stability"]["observations"], 2)
+        self.assertEqual(rows["id_stability"]["scope"], "same_page_two_frames")
+        self.assertEqual(rows["id_stability"]["same_page_result"], "unchanged")
+        self.assertEqual(rows["id_shapes"]["other_shape"], 2)
+        self.assertEqual(findings["rows"]["reason"], "message_rows_observed_direction_time_reply_unconfirmed")
+        same = findings["same-text"]["message_preflight"]
+        self.assertEqual(same["same_text_different_id_rows"], 2)
+        self.assertEqual(same["time_evidence"], "clock_without_date")
+        self.assertEqual(findings["clock"]["message_preflight"]["time_evidence"], "clock_without_date")
+        self.assertEqual(
+            findings["dated"]["message_preflight"]["time_evidence"],
+            "parseable_shape_on_row_meaning_unconfirmed",
+        )
+        self.assertFalse(findings["list-only"]["message_region"]["reached"])
+        self.assertEqual(findings["list-only"]["message_preflight"]["visible_rows"], 0)
+        self.assertIn("chat-item", findings["list-only"]["message_region"]["conversation_list_landmarks"])
+
+    def test_simulated_auto_reply_commits_on_localhost_only(self) -> None:
+        from inbox_collector.auto_reply import LoopbackGenerator, run_simulated_cycle
+        from inbox_collector.browser_session import DedicatedBrowser
+        from inbox_collector.store import Store
+
+        def page_html(inner: str, *, state: str = "inbox", composer: str = "conv-sim-1", receipt: bool = True) -> str:
+            receipt_js = (
+                "const item = document.createElement('li');"
+                "item.className = 'sim-outgoing onemsg';"
+                "item.setAttribute('data-receipt', 'sent');"
+                "item.setAttribute('data-sim-direction', 'merchant');"
+                "item.textContent = text;"
+                "document.querySelector('.content-box').appendChild(item);"
+            )
+            action = receipt_js if receipt else ""
+            return (
+                "<!DOCTYPE html><html data-simulated-inbox='true'><body "
+                f"data-page-state='{state}' data-open-conversation='conv-sim-1'>"
+                f"<div class='content-box' data-sim-conversation='conv-sim-1'>{inner}</div>"
+                f"<textarea id='sim-composer' data-sim-conversation='{composer}'></textarea>"
+                "<button type='button' id='sim-send'>发送</button><script>"
+                "window.__sendClicks = 0; window.__enterUsed = false;"
+                "document.querySelector('#sim-send').addEventListener('click', () => {"
+                "window.__sendClicks += 1;"
+                "const text = document.querySelector('#sim-composer').value;"
+                f"{action}"
+                "});"
+                "document.querySelector('#sim-composer').addEventListener('keydown', (event) => {"
+                "if (event.key === 'Enter') window.__enterUsed = true;"
+                "});"
+                "</script></body></html>"
+            )
+
+        buyer = (
+            "<li class='clearfix onemsg' id='m-1' data-sim-direction='buyer'>"
+            "<div class='merchantMessage'><p class='msg-content-box'>【模拟】你好，在吗</p>"
+            "<p class='message-time'>09:01</p></div></li>"
+        )
+        tags = {
+            "models": [
+                {"name": "qwen-kefu:latest", "size": 1117321521, "details": {"family": "qwen2"}}
+            ]
+        }
+        calls: list[tuple[str, str]] = []
+
+        def transport(method: str, path: str, body: dict | None, timeout: int) -> tuple[int, dict]:
+            calls.append((method, path))
+            self.assertEqual(timeout, 45)
+            if path == "/api/tags":
+                return 200, tags
+            self.assertEqual(method, "POST")
+            assert body is not None
+            self.assertEqual(body["model"], "qwen-kefu:latest")
+            self.assertEqual(body["options"]["num_predict"], 24)
+            self.assertFalse(body["stream"])
+            return 200, {"response": "您好，已收到。", "done": True, "done_reason": "stop"}
+
+        browser = DedicatedBrowser(self.data / "reply-profile")
+        browser.start()
+        self.addCleanup(browser.close)
+        store = Store(self.data / "reply-store")
+        self.addCleanup(store.close)
+        generator = LoopbackGenerator(transport, transport_label="injected_test_double")
+        self.html_path.write_text(page_html(buyer), encoding="utf-8")
+        browser.page.goto(f"http://127.0.0.1:{self.port}/inbox.html")
+        first = run_simulated_cycle(browser.page, store, generator, min_interval=0, max_per_hour=3, now=1_700_000_000)
+        self.assertEqual(first["status"], "simulated_sent")
+        self.assertFalse(first["real_buyer_send"])
+        self.assertFalse(first["production_send_allowed"])
+        self.assertFalse(first["mac_ollama_contacted"])
+        self.assertFalse(first["customer_service_quality_verified"])
+        self.assertFalse(first["official_composer_verified"])
+        self.assertEqual(first["generator_transport"], "injected_test_double")
+        self.assertEqual(first["model"], "qwen-kefu:latest")
+        self.assertEqual(first["num_predict"], 24)
+        self.assertEqual(first["composer_commits"], 1)
+        self.assertIn("mapping_not_validated", first["production_blockers"])
+        self.assertEqual(calls, [("GET", "/api/tags"), ("POST", "/api/generate")])
+        self.assertEqual(browser.page.evaluate("() => window.__sendClicks"), 1)
+        self.assertFalse(browser.page.evaluate("() => window.__enterUsed"))
+        self.assertIn("【模拟】您好，已收到。", browser.page.locator(".sim-outgoing").inner_text())
+        browser.page.evaluate("() => document.querySelectorAll('.sim-outgoing').forEach((node) => node.remove())")
+        second = run_simulated_cycle(
+            browser.page, store, generator, min_interval=0, max_per_hour=3, now=1_700_000_010
+        )
+        self.assertEqual(second["status"], "no_eligible_buyer_message")
+        self.assertEqual(browser.page.evaluate("() => window.__sendClicks"), 1)
+        self.assertEqual(len(calls), 2)
+
+        refund_store = Store(self.data / "refund-store")
+        self.addCleanup(refund_store.close)
+        before = len(calls)
+        self.html_path.write_text(
+            page_html(
+                "<li class='onemsg' id='refund-1' data-sim-direction='buyer'>"
+                "<p class='msg-content-box'>【模拟】我要退款</p></li>"
+            ),
+            encoding="utf-8",
+        )
+        browser.page.goto(f"http://127.0.0.1:{self.port}/inbox.html")
+        refund = run_simulated_cycle(browser.page, refund_store, generator, min_interval=0, max_per_hour=3, now=20)
+        self.assertEqual(refund["status"], "no_eligible_buyer_message")
+        self.assertEqual(len(calls), before)
+        self.assertEqual(browser.page.evaluate("() => window.__sendClicks"), 0)
+
+        dup_store = Store(self.data / "dup-store")
+        self.addCleanup(dup_store.close)
+        self.html_path.write_text(
+            page_html(
+                "<li class='onemsg' id='id-a' data-sim-direction='buyer'>"
+                "<p class='msg-content-box'>【模拟】你好，相同问句</p></li>"
+                "<li class='onemsg' id='id-b' data-sim-direction='buyer'>"
+                "<p class='msg-content-box'>【模拟】你好，相同问句</p></li>"
+            ),
+            encoding="utf-8",
+        )
+        browser.page.goto(f"http://127.0.0.1:{self.port}/inbox.html")
+        dup = run_simulated_cycle(browser.page, dup_store, generator, min_interval=0, max_per_hour=3, now=30)
+        self.assertEqual(dup["status"], "simulated_sent")
+        self.assertEqual(dup["deduped_same_text_count"], 1)
+        self.assertEqual(browser.page.evaluate("() => window.__sendClicks"), 1)
+
+        read_store = Store(self.data / "read-store")
+        self.addCleanup(read_store.close)
+        self.html_path.write_text(
+            page_html(
+                "<li class='onemsg' id='read-1' data-sim-direction='buyer'>"
+                "<div class='merchantMessage'><p class='msg-content-box'>【模拟】你好</p>"
+                "<div class='cs-item isread'></div></div></li>"
+            ),
+            encoding="utf-8",
+        )
+        browser.page.goto(f"http://127.0.0.1:{self.port}/inbox.html")
+        read_mark = run_simulated_cycle(browser.page, read_store, generator, min_interval=0, max_per_hour=3, now=40)
+        self.assertEqual(read_mark["status"], "simulated_sent")
+
+        replied_store = Store(self.data / "replied-store")
+        self.addCleanup(replied_store.close)
+        before = len(calls)
+        self.html_path.write_text(
+            page_html(
+                "<li class='onemsg' id='buyer-2' data-sim-direction='buyer'>"
+                "<p class='msg-content-box'>【模拟】你好</p></li>"
+                "<li class='onemsg' id='human-2' data-sim-direction='merchant' data-sim-reply='human'>"
+                "<p class='msg-content-box'>人工已经回复</p></li>"
+            ),
+            encoding="utf-8",
+        )
+        browser.page.goto(f"http://127.0.0.1:{self.port}/inbox.html")
+        replied = run_simulated_cycle(browser.page, replied_store, generator, min_interval=0, max_per_hour=3, now=50)
+        self.assertEqual(replied["status"], "no_eligible_buyer_message")
+        self.assertEqual(len(calls), before)
+        self.assertEqual(browser.page.evaluate("() => window.__sendClicks"), 0)
+
+        blind_store = Store(self.data / "blind-store")
+        self.addCleanup(blind_store.close)
+        self.html_path.write_text(page_html(buyer, receipt=False), encoding="utf-8")
+        browser.page.goto(f"http://127.0.0.1:{self.port}/inbox.html")
+        uncertain = run_simulated_cycle(browser.page, blind_store, generator, min_interval=0, max_per_hour=3, now=60)
+        self.assertEqual(uncertain["status"], "paused_uncertain")
+        self.assertFalse(uncertain["resend_allowed"])
+        self.assertEqual(browser.page.evaluate("() => window.__sendClicks"), 1)
+        again = run_simulated_cycle(browser.page, blind_store, generator, min_interval=0, max_per_hour=3, now=70)
+        self.assertEqual(again["status"], "refused_stop")
+        self.assertEqual(browser.page.evaluate("() => window.__sendClicks"), 1)
+
+        shift_store = Store(self.data / "shift-store")
+        self.addCleanup(shift_store.close)
+
+        def shifting(method: str, path: str, body: dict | None, timeout: int) -> tuple[int, dict]:
+            if path == "/api/generate":
+                browser.page.evaluate(
+                    "() => document.body.setAttribute('data-open-conversation', 'conv-other')"
+                )
+            return transport(method, path, body, timeout)
+
+        self.html_path.write_text(page_html(buyer), encoding="utf-8")
+        browser.page.goto(f"http://127.0.0.1:{self.port}/inbox.html")
+        shifted = run_simulated_cycle(
+            browser.page,
+            shift_store,
+            LoopbackGenerator(shifting, transport_label="injected_test_double"),
+            min_interval=0,
+            max_per_hour=3,
+            now=80,
+        )
+        self.assertEqual(shifted["status"], "refused_conversation_changed")
+        self.assertEqual(browser.page.evaluate("() => window.__sendClicks"), 0)
+
+        login_store = Store(self.data / "login-store")
+        self.addCleanup(login_store.close)
+        self.html_path.write_text(page_html(buyer, state="captcha"), encoding="utf-8")
+        browser.page.goto(f"http://127.0.0.1:{self.port}/inbox.html")
+        captcha = run_simulated_cycle(browser.page, login_store, generator, min_interval=0, max_per_hour=3, now=90)
+        self.assertEqual(captcha["status"], "refused_page_captcha")
+        self.assertEqual(browser.page.evaluate("() => window.__sendClicks"), 0)
 
     def test_diagnose_uses_the_open_page_without_navigation(self) -> None:
         from inbox_collector.dom_diagnose import export_rendered_dom, service_diagnose_request

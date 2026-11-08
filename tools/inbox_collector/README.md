@@ -52,7 +52,9 @@ Profile 里会留下登录态，只放在本机，不要复制、同步或提交
 
 新版仍只读当前页。它会进入已经渲染、且能确认属于客服页的同源 frame（正式页只限 `mms.pinduoduo.com/chat-merchant` 及其同源客服 frame；本地测试只限 `127.0.0.1` / `localhost`）。读不到的 frame、登录/密码 frame、支付 frame，以及不能确认是客服区域的 frame，只记跳过原因，不绕过浏览器限制。open shadow 会进入。closed shadow 读不到，结果里会标明这个限制，但不会把它说成“页面没有消息”。已知的消息区 class（`content-box`、`reply-box`、`chat-item`）和会话列表 class 分开记录。`loadMoreMsg` 单独出现不算消息区。浅层列表不会被当成消息。
 
-导出的仍是标签名、属性名、安全 class、frame 计数和来源分类、覆盖范围、真实截断原因，以及原来的值形状分类。原始 id、正文、身份、日期原文和 URL 不会写出。生产 mapping 仍是 false。
+导出的仍是标签名、属性名、安全 class、frame 计数和来源分类、覆盖范围、真实截断原因，以及原来的值形状分类。`li.chat-item` 只算会话列表，不能单独让 `message_region` 为 true。消息 preflight 只在 `content-box` 里的 `li.onemsg` 上关联子孙时间节点和邻接日期头，`merchantMessage` / `buyer-item` 只记结构、不从名字判断方向，`isread` 只记 `read_unknown`。同一页会做两次观察比较可见行 id，但同页稳定不等于跨重启稳定。原始 id、正文、身份、日期原文和 URL 不会写出。生产 mapping 仍是 false。
+
+自动回复默认关闭。`auto-reply-gates` 永远报告 `production_send_allowed: false`。本地模拟链路只在 `127.0.0.1` / `localhost` 的模拟页上，用已核验的公开 Ollama 契约（`http://127.0.0.1:11434`，模型 `qwen-kefu:latest`，`num_predict` 24，45 秒，`done_reason=stop`）生成一句普通问候。这不是客服质量验证，也不是买家发送。云端测试注入替身传输，不连接 Mac。退款、改价、补偿，以及没有资料的价格、物流、规格、安装、售后，不会自动发。发送前会再核当前会话；没有 DOM 回执就暂停且不重发。官方页面的输入框和发送按钮仍未验证。
 
 一次采样不能证明 id 换消息后仍稳定，所以 `can_use_for_dedupe` 保持 false。格式说明不会被当成时间；形状像时间也只记为需要人工确认含义，`can_treat_time_as_message_time` 保持 false。其它文字只记为 `other_redacted`。隐藏行、重复 id、或 `aria-rowcount` 大于当前渲染行数时，证据记为不充分。结果里的 `human_checks` 是最低必要的人工核对，不是采集成功。生产 mapping 仍是 false。
 

@@ -24,8 +24,8 @@ _TEXT_CARRIER_NAMES = frozenset({"title", "aria-label", "href", "data-clipboard-
 # Values are classified inside the page. Only counts and safe class tokens leave it.
 # Light-DOM landmark search is not capped at the old depth-8 export. Frames are
 # entered only when the document is already readable and the origin/path is in scope.
-_MESSAGE_LANDMARKS = frozenset({"content-box", "reply-box", "chat-item"})
-_LIST_LANDMARKS = frozenset({"chat-list-box", "chatWindowHeader"})
+_MESSAGE_LANDMARKS = frozenset({"content-box", "reply-box"})
+_LIST_LANDMARKS = frozenset({"chat-list-box", "chatWindowHeader", "chat-item"})
 _HISTORY_LANDMARKS = frozenset({"loadMoreMsg"})
 _FRAME_CATEGORIES = frozenset(
     {
@@ -63,8 +63,8 @@ _TRUNCATION_REASONS = frozenset(
 )
 _EXPORT_JS = """
 () => {
-  const MESSAGE = new Set(["content-box", "reply-box", "chat-item"]);
-  const LIST = new Set(["chat-list-box", "chatWindowHeader"]);
+  const MESSAGE = new Set(["content-box", "reply-box"]);
+  const LIST = new Set(["chat-list-box", "chatWindowHeader", "chat-item"]);
   const HISTORY = new Set(["loadMoreMsg"]);
   const VISIT_LIMIT = 12000;
   const DEPTH_LIMIT = 64;
@@ -169,15 +169,16 @@ _EXPORT_JS = """
   const regionOf = (el) => {
     let cur = el;
     let guard = 0;
+    let sawList = false;
     while (cur && guard < 80) {
       const names = classesOf(cur);
       if (names.some((name) => MESSAGE.has(name))) return "message_container";
-      if (names.some((name) => LIST.has(name))) return "conversation_list";
+      if (names.some((name) => LIST.has(name))) sawList = true;
       const root = cur.getRootNode ? cur.getRootNode() : null;
       cur = cur.parentElement || (root && root.host) || null;
       guard += 1;
     }
-    return "unspecified";
+    return sawList ? "conversation_list" : "unspecified";
   };
   const remember = (el, frameCategory, inShadow, inFrame) => {
     const names = classesOf(el);
@@ -429,7 +430,212 @@ _EXPORT_JS = """
   const listHits = landmarkEls.filter((item) => item.names.some((name) => LIST.has(name)));
   const historyHits = landmarkEls.filter((item) => item.names.some((name) => HISTORY.has(name)));
   const incomplete = reasons.size > 0;
-  return {
+  const timeShapeOf = (value) => {
+    const text = String(value || "").replace(/\\s+/g, " ").trim();
+    if (!text) return "empty";
+    if (text.length > 60) return "other_redacted";
+    const date = /\\d{4}[-/.年]\\s?\\d{1,2}[-/.月]\\s?\\d{1,2}/.test(text) || /\\d{1,2}月\\d{1,2}日/.test(text);
+    const clock = /\\d{1,2}:\\d{2}/.test(text);
+    if (date && clock) return "date_and_time";
+    if (date && text.length <= 24) return "date_only";
+    if (/^\\d{1,2}:\\d{2}(?::\\d{2})?$/.test(text)) return "clock_without_date";
+    if (clock) return "clock_with_other_text";
+    return "other_redacted";
+  };
+  const classWithinRow = (row, name) => {
+    if (classesOf(row).includes(name)) return row;
+    let found = [];
+    try { found = row.querySelectorAll("." + name); } catch (e) { return null; }
+    for (const el of found) {
+      const owner = el.closest ? el.closest("li.onemsg") : null;
+      if (owner === row) return el;
+    }
+    return null;
+  };
+  const describeRow = (row) => {
+    const merchant = classWithinRow(row, "merchantMessage");
+    const buyer = classWithinRow(row, "buyer-item");
+    let buyerRelation = "absent";
+    if (buyer) {
+      if (merchant && merchant.contains(buyer)) buyerRelation = "inside_merchant_message";
+      else if (merchant && buyer.contains(merchant)) buyerRelation = "ancestor_of_merchant_message";
+      else if (merchant && merchant.parentElement && buyer.parentElement === merchant.parentElement) buyerRelation = "sibling_of_merchant_message";
+      else buyerRelation = "elsewhere_in_row";
+    }
+    const timeEl = classWithinRow(row, "message-time");
+    let header = "absent";
+    let prev = row.previousElementSibling;
+    let guard = 0;
+    while (prev && guard < 6) {
+      if (classesOf(prev).includes("onemsg")) break;
+      const shape = timeShapeOf(prev.textContent);
+      if (shape === "date_only" || shape === "date_and_time") { header = "present"; break; }
+      prev = prev.previousElementSibling;
+      guard += 1;
+    }
+    const bodyEl = classWithinRow(row, "msg-content-box") || classWithinRow(row, "msg-content");
+    const attrNames = [];
+    for (const attr of Array.from(row.attributes || [])) {
+      const name = String(attr.name || "");
+      if (name === "tabindex" || name.indexOf("data-v-") === 0) continue;
+      if (/^[A-Za-z_:][A-Za-z0-9_:-]{0,40}$/.test(name) && attrNames.indexOf(name) < 0) attrNames.push(name);
+    }
+    return {
+      idValue: row.getAttribute("id") || "",
+      textKey: bodyEl ? String(bodyEl.textContent || "").replace(/\\s+/g, " ").trim() : "",
+      hidden: isHidden(row),
+      merchant: !!merchant,
+      buyerRelation,
+      timeShape: timeEl ? timeShapeOf(timeEl.textContent) : "absent",
+      header,
+      readMark: classWithinRow(row, "isread") ? "present" : "absent",
+      attrNames
+    };
+  };
+  const scanRows = () => {
+    const rows = [];
+    const seen = new Set();
+    let boxes = 0;
+    let truncated = false;
+    const roots = [];
+    for (const doc of seenDocs) roots.push(doc);
+    for (const shadow of seenShadows) roots.push(shadow);
+    for (const root of roots) {
+      let boxesFound = [];
+      try { boxesFound = root.querySelectorAll ? root.querySelectorAll(".content-box") : []; }
+      catch (e) { boxesFound = []; }
+      for (const box of boxesFound) {
+        if (seen.has(box)) continue;
+        seen.add(box);
+        boxes += 1;
+        let found = [];
+        try { found = box.querySelectorAll("li.onemsg"); } catch (e) { found = []; }
+        for (const row of found) {
+          if (seen.has(row)) continue;
+          if (rows.length >= 200) { truncated = true; break; }
+          seen.add(row);
+          rows.push(describeRow(row));
+        }
+      }
+    }
+    return { rows, boxes, truncated };
+  };
+  const summarize = (pass, stability) => {
+    const visible = pass.rows.filter((row) => !row.hidden);
+    const hidden = pass.rows.length - visible.length;
+    const withMerchant = visible.filter((row) => row.merchant).length;
+    let merchantRelation = "absent";
+    if (visible.length && withMerchant === visible.length) merchantRelation = "covers_every_visible_row";
+    else if (withMerchant > 0) merchantRelation = "covers_some_rows";
+    const buyer = { absent: 0, inside_merchant_message: 0, ancestor_of_merchant_message: 0, sibling_of_merchant_message: 0, elsewhere_in_row: 0 };
+    const times = {};
+    let headerPresent = 0;
+    let readPresent = 0;
+    const patterns = new Map();
+    const attrNames = new Set();
+    const idShapes = { generic_shell: 0, other_shape: 0, long_numeric: 0, long: 0, empty: 0 };
+    const visibleIds = new Map();
+    const textIds = new Map();
+    for (const row of visible) {
+      buyer[row.buyerRelation] = (buyer[row.buyerRelation] || 0) + 1;
+      times[row.timeShape] = (times[row.timeShape] || 0) + 1;
+      if (row.header === "present") headerPresent += 1;
+      if (row.readMark === "present") readPresent += 1;
+      idShapes[idShape(row.idValue)] += 1;
+      if (row.idValue) visibleIds.set(row.idValue, (visibleIds.get(row.idValue) || 0) + 1);
+      if (row.textKey && row.idValue) {
+        if (!textIds.has(row.textKey)) textIds.set(row.textKey, new Set());
+        textIds.get(row.textKey).add(row.idValue);
+      }
+      for (const name of row.attrNames) attrNames.add(name);
+      const key = [row.merchant ? "merchant" : "no_merchant", row.buyerRelation, row.timeShape, row.header, row.readMark].join("|");
+      patterns.set(key, (patterns.get(key) || 0) + 1);
+    }
+    let sameTextDifferentId = 0;
+    for (const ids of textIds.values()) if (ids.size > 1) sameTextDifferentId += ids.size;
+    let duplicatedVisibleIds = 0;
+    for (const count of visibleIds.values()) if (count > 1) duplicatedVisibleIds += 1;
+    const visibleIdSet = new Set(visibleIds.keys());
+    let hiddenCollides = 0;
+    for (const row of pass.rows) if (row.hidden && row.idValue && visibleIdSet.has(row.idValue)) hiddenCollides += 1;
+    const presentTimes = Object.keys(times).filter((key) => key !== "absent" && times[key]);
+    let timeEvidence = "absent";
+    if (presentTimes.length === 1 && presentTimes[0] === "clock_without_date" && headerPresent > 0) timeEvidence = "clock_with_adjacent_date_header";
+    else if (presentTimes.length === 1 && presentTimes[0] === "clock_without_date") timeEvidence = "clock_without_date";
+    else if (presentTimes.length === 1 && presentTimes[0] === "date_and_time") timeEvidence = "parseable_shape_on_row_meaning_unconfirmed";
+    else if (presentTimes.length > 0) timeEvidence = "mixed_or_unreadable";
+    const patternRows = [];
+    for (const [key, count] of patterns) {
+      const parts = key.split("|");
+      patternRows.push({
+        visible: count,
+        merchant_message: parts[0] === "merchant" ? "present" : "absent",
+        buyer_item: parts[1],
+        time_shape: parts[2],
+        adjacent_date_header: parts[3],
+        read_mark: parts[4],
+        reply_status: "read_unknown"
+      });
+    }
+    return {
+      content_boxes: pass.boxes,
+      rows_seen: pass.rows.length,
+      visible_rows: visible.length,
+      hidden_rows: hidden,
+      truncated: pass.truncated,
+      row_boundary: { tag: "li", class_name: "onemsg", validated: false },
+      chat_item_counts_as_message_region: false,
+      merchant_message: { visible_rows_containing: withMerchant, relation: merchantRelation, used_as_direction: false },
+      buyer_item: buyer,
+      direction_evidence: "insufficient_name_not_used",
+      time_shapes: times,
+      rows_with_adjacent_date_header: headerPresent,
+      time_evidence: timeEvidence,
+      can_treat_time_as_message_time: false,
+      read_mark_rows: readPresent,
+      reply_evidence: "read_unknown",
+      attribute_names: Array.from(attrNames).slice(0, 12),
+      id_shapes: idShapes,
+      duplicated_visible_ids: duplicatedVisibleIds,
+      same_text_different_id_rows: sameTextDifferentId,
+      hidden_id_collides_with_visible: hiddenCollides,
+      patterns: patternRows.slice(0, 12),
+      id_stability: stability,
+      body_retained: false,
+      values_included: false,
+      production_mapping_validated: false
+    };
+  };
+  const comparePasses = (first, second) => {
+    const av = first.rows.filter((row) => !row.hidden);
+    const bv = second.rows.filter((row) => !row.hidden);
+    let same = 0;
+    let changed = 0;
+    let missing = 0;
+    const limit = Math.min(av.length, bv.length);
+    for (let index = 0; index < limit; index += 1) {
+      if (!av[index].idValue || !bv[index].idValue) { missing += 1; continue; }
+      if (av[index].idValue === bv[index].idValue) same += 1;
+      else changed += 1;
+    }
+    let samePage = "incomplete";
+    if (av.length === bv.length && missing === 0 && changed === 0 && same === av.length && av.length > 0) samePage = "unchanged";
+    else if (changed > 0 || av.length !== bv.length) samePage = "changed";
+    return {
+      observations: 2,
+      scope: "same_page_two_frames",
+      cross_restart: "unproven",
+      visible_first: av.length,
+      visible_second: bv.length,
+      same_id_at_same_position: same,
+      id_changed_at_same_position: changed,
+      positions_without_id: missing,
+      same_page_result: samePage,
+      can_use_for_dedupe: false
+    };
+  };
+  const buildReport = (firstPass, secondPass) => {
+    return {
     nodes,
     truncated: incomplete,
     truncation_reasons: Array.from(reasons),
@@ -457,10 +663,24 @@ _EXPORT_JS = """
       conversation_list_landmarks: listHits.reduce((bag, item) => bag.concat(item.names.filter((name) => LIST.has(name))), []),
       history_controls: historyHits.reduce((bag, item) => bag.concat(item.names.filter((name) => HISTORY.has(name))), []),
       max_landmark_depth: messageHits.reduce((deepest, item) => Math.max(deepest, item.depth), 0),
-      conversation_list_counted_as_messages: false
+      conversation_list_counted_as_messages: false,
+      chat_item_counts_as_message_region: false
     },
+    message_preflight: summarize(secondPass, comparePasses(firstPass, secondPass)),
     value_assessment: { groups, shell_ids: shell }
   };
+  };
+  const firstPass = scanRows();
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve(buildReport(firstPass, scanRows()));
+    };
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(finish);
+    setTimeout(finish, 50);
+  });
 }
 """
 
@@ -590,6 +810,7 @@ def _apply_scope(report: dict[str, Any], raw: dict[str, Any]) -> None:
         "history_controls": _unique(history_names),
         "max_landmark_depth": _clean_int((region_in or {}).get("max_landmark_depth")),
         "conversation_list_counted_as_messages": False,
+        "chat_item_counts_as_message_region": False,
         "structure_exported": any(
             node.get("region") == "message_container" for node in report.get("nodes") or []
         ),
@@ -608,6 +829,149 @@ def _apply_scope(report: dict[str, Any], raw: dict[str, Any]) -> None:
     elif incomplete or top_page in {"login_or_credential", "payment", "off_scope"}:
         report["status"] = "coverage_incomplete"
         report["reason"] = region_reason
+
+
+_PREFLIGHT_RELATIONS = frozenset(
+    {
+        "absent",
+        "covers_every_visible_row",
+        "covers_some_rows",
+        "inside_merchant_message",
+        "ancestor_of_merchant_message",
+        "sibling_of_merchant_message",
+        "elsewhere_in_row",
+    }
+)
+_PREFLIGHT_SHAPES = frozenset(
+    {
+        "empty",
+        "absent",
+        "date_and_time",
+        "date_only",
+        "clock_without_date",
+        "clock_with_other_text",
+        "other_redacted",
+        "present",
+    }
+)
+_PREFLIGHT_TIME = frozenset(
+    {
+        "absent",
+        "clock_with_adjacent_date_header",
+        "clock_without_date",
+        "parseable_shape_on_row_meaning_unconfirmed",
+        "mixed_or_unreadable",
+    }
+)
+_PREFLIGHT_STABILITY = frozenset({"unchanged", "changed", "incomplete"})
+_ATTR_NAME = re.compile(r"^[A-Za-z_:][A-Za-z0-9_:-]{0,40}$")
+
+
+def _clean_preflight(raw: Any) -> dict[str, Any]:
+    """Keep counts and enums. Drop raw ids, bodies, dates, and URLs."""
+    if not isinstance(raw, dict):
+        return {
+            "source": "not_provided",
+            "visible_rows": 0,
+            "direction_evidence": "insufficient_name_not_used",
+            "reply_evidence": "read_unknown",
+            "can_treat_time_as_message_time": False,
+            "chat_item_counts_as_message_region": False,
+            "body_retained": False,
+            "values_included": False,
+            "production_mapping_validated": False,
+        }
+    buyer_in = raw.get("buyer_item") if isinstance(raw.get("buyer_item"), dict) else {}
+    buyer = {
+        key: _clean_int(buyer_in.get(key))
+        for key in (
+            "absent",
+            "inside_merchant_message",
+            "ancestor_of_merchant_message",
+            "sibling_of_merchant_message",
+            "elsewhere_in_row",
+        )
+    }
+    shapes_in = raw.get("time_shapes") if isinstance(raw.get("time_shapes"), dict) else {}
+    time_shapes = {key: _clean_int(shapes_in.get(key)) for key in _PREFLIGHT_SHAPES}
+    ids_in = raw.get("id_shapes") if isinstance(raw.get("id_shapes"), dict) else {}
+    id_shapes = {
+        key: _clean_int(ids_in.get(key))
+        for key in ("generic_shell", "other_shape", "long_numeric", "long", "empty")
+    }
+    merchant_in = raw.get("merchant_message") if isinstance(raw.get("merchant_message"), dict) else {}
+    relation = merchant_in.get("relation")
+    stability_in = raw.get("id_stability") if isinstance(raw.get("id_stability"), dict) else {}
+    same_page = stability_in.get("same_page_result")
+    patterns = []
+    for item in raw.get("patterns") or []:
+        if not isinstance(item, dict) or len(patterns) >= 12:
+            continue
+        buyer_item = item.get("buyer_item")
+        time_shape = item.get("time_shape")
+        header = item.get("adjacent_date_header")
+        read_mark = item.get("read_mark")
+        merchant = item.get("merchant_message")
+        patterns.append(
+            {
+                "visible": _clean_int(item.get("visible")),
+                "merchant_message": merchant if merchant in {"present", "absent"} else "absent",
+                "buyer_item": buyer_item if buyer_item in _PREFLIGHT_RELATIONS else "absent",
+                "time_shape": time_shape if time_shape in _PREFLIGHT_SHAPES else "other_redacted",
+                "adjacent_date_header": header if header in {"present", "absent"} else "absent",
+                "read_mark": read_mark if read_mark in {"present", "absent"} else "absent",
+                "reply_status": "read_unknown",
+            }
+        )
+    names = [
+        name
+        for name in raw.get("attribute_names") or []
+        if isinstance(name, str) and _ATTR_NAME.fullmatch(name) and not name.startswith("data-v-")
+    ]
+    return {
+        "source": "in_page",
+        "content_boxes": _clean_int(raw.get("content_boxes")),
+        "rows_seen": _clean_int(raw.get("rows_seen")),
+        "visible_rows": _clean_int(raw.get("visible_rows")),
+        "hidden_rows": _clean_int(raw.get("hidden_rows")),
+        "truncated": raw.get("truncated") is True,
+        "row_boundary": {"tag": "li", "class_name": "onemsg", "validated": False},
+        "chat_item_counts_as_message_region": False,
+        "merchant_message": {
+            "visible_rows_containing": _clean_int(merchant_in.get("visible_rows_containing")),
+            "relation": relation if relation in _PREFLIGHT_RELATIONS else "absent",
+            "used_as_direction": False,
+        },
+        "buyer_item": buyer,
+        "direction_evidence": "insufficient_name_not_used",
+        "time_shapes": time_shapes,
+        "rows_with_adjacent_date_header": _clean_int(raw.get("rows_with_adjacent_date_header")),
+        "time_evidence": raw.get("time_evidence") if raw.get("time_evidence") in _PREFLIGHT_TIME else "absent",
+        "can_treat_time_as_message_time": False,
+        "read_mark_rows": _clean_int(raw.get("read_mark_rows")),
+        "reply_evidence": "read_unknown",
+        "attribute_names": names[:12],
+        "id_shapes": id_shapes,
+        "duplicated_visible_ids": _clean_int(raw.get("duplicated_visible_ids")),
+        "same_text_different_id_rows": _clean_int(raw.get("same_text_different_id_rows")),
+        "hidden_id_collides_with_visible": _clean_int(raw.get("hidden_id_collides_with_visible")),
+        "patterns": patterns,
+        "id_stability": {
+            "observations": 2 if _clean_int(stability_in.get("observations")) == 2 else 0,
+            "scope": "same_page_two_frames",
+            "cross_restart": "unproven",
+            "visible_first": _clean_int(stability_in.get("visible_first")),
+            "visible_second": _clean_int(stability_in.get("visible_second")),
+            "same_id_at_same_position": _clean_int(stability_in.get("same_id_at_same_position")),
+            "id_changed_at_same_position": _clean_int(stability_in.get("id_changed_at_same_position")),
+            "positions_without_id": _clean_int(stability_in.get("positions_without_id")),
+            "same_page_result": same_page if same_page in _PREFLIGHT_STABILITY else "incomplete",
+            "can_use_for_dedupe": False,
+        },
+        "body_retained": False,
+        "values_included": False,
+        "production_mapping_validated": False,
+    }
 
 
 def export_rendered_dom(page: Any, *, timeout_seconds: float = 2.0) -> dict[str, Any]:
@@ -629,6 +993,17 @@ def export_rendered_dom(page: Any, *, timeout_seconds: float = 2.0) -> dict[str,
     report = _classify(nodes, truncated=bool(raw.get("truncated")))
     report["value_assessment"] = _value_decisions(raw.get("value_assessment"))
     _apply_scope(report, raw)
+    report["message_preflight"] = _clean_preflight(raw.get("message_preflight"))
+    preflight = report["message_preflight"]
+    if (
+        preflight.get("visible_rows", 0) > 0
+        and report.get("status") not in {"conversation_not_selected", "structure_observed", "diagnostic_error"}
+    ):
+        report["status"] = "identity_unproven"
+        report["reason"] = "message_rows_observed_direction_time_reply_unconfirmed"
+    report["production_mapping_validated"] = False
+    report["collection_enabled"] = False
+    report["selectors_inferred"] = False
     return report
 
 

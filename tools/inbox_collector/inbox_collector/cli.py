@@ -348,6 +348,9 @@ def build_parser() -> argparse.ArgumentParser:
     routine_setup = sub.add_parser("routine-setup")
     routine_setup.add_argument("--url", required=True)
     routine_setup.add_argument("--config", type=Path, required=True)
+
+    gates = sub.add_parser("auto-reply-gates")
+    gates.add_argument("--config", type=Path, required=True)
     return parser
 
 
@@ -384,6 +387,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_diagnose_dom(args.data_dir, args.timeout_seconds)
     if args.command == "routine-setup":
         return cmd_routine_setup(args.url, args.config)
+    if args.command == "auto-reply-gates":
+        from inbox_collector.auto_reply import gate_report
+
+        try:
+            raw = json.loads(args.config.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            raw = {}
+        report = gate_report(raw if isinstance(raw, dict) else {})
+        report["ok"] = False
+        _print(report)
+        return 2
     if args.command == "browser-plan":
         config, problems = load_config(args.config)
         if config is None:

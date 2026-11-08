@@ -88,4 +88,8 @@ def build_health(
         "sample_interval_seconds": None if config is None else config.sample_interval_seconds,
         "interval_is_bot_routine": False,
         "sent_to_buyer": False,
+        "auto_reply_enabled": False,
+        "production_send_allowed": False,
+        "generator_quality_verified": False,
+        "mac_ollama_contacted": False,
     }
