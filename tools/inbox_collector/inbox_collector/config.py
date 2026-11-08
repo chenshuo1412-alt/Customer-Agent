@@ -35,9 +35,11 @@ class AppConfig:
     data_dir: Path
     draft_provider: str
     webhook_enabled: bool
+    webhook_auth_mode: str
     webhook_url: str
     webhook_secret_env: str
     webhook_allow_network: bool
+    webhook_key_source: str
     alert_sink_enabled: bool
     alert_sink_url: str
     model_enabled: bool
@@ -160,13 +162,30 @@ def load_config(path: Path) -> tuple[AppConfig | None, list[str]]:
     webhook_url = str(webhook.get("url") or "")
     webhook_secret_env = str(webhook.get("webhook_secret_env") or "")
     webhook_allow_network = webhook.get("allow_network") is True
+    webhook_auth_mode = str(webhook.get("auth_mode") or "").strip()
+    webhook_key_source = str(webhook.get("key_source") or "").strip()
+    if webhook_url and (urlsplit_has_secret(webhook_url)):
+        problems.append("webhook_url_has_secret")
     if webhook_enabled:
         if not webhook_url.startswith("https://"):
             problems.append("webhook_url_must_be_https")
-        if not webhook_secret_env or not webhook_secret_env.isidentifier():
+        if webhook_auth_mode not in {"hmac", "routine_bearer"}:
+            problems.append("webhook_auth_mode_required")
+        if webhook_auth_mode == "hmac" and (
+            not webhook_secret_env or not webhook_secret_env.isidentifier()
+        ):
             problems.append("webhook_secret_env_invalid")
+        if webhook_auth_mode == "routine_bearer":
+            if webhook_secret_env:
+                problems.append("routine_key_must_use_keychain")
+            if webhook_key_source not in {"", "keychain"}:
+                problems.append("routine_key_source_invalid")
     if provider == "webhook" and not webhook_enabled:
         problems.append("webhook_provider_not_enabled")
+    if provider == "routine_bearer" and (
+        not webhook_enabled or webhook_auth_mode != "routine_bearer"
+    ):
+        problems.append("routine_bearer_not_enabled")
     alert_enabled = alert.get("enabled") is True
     alert_url = str(alert.get("url") or "")
     if alert_enabled and not alert_url.startswith("https://"):
@@ -198,9 +217,11 @@ def load_config(path: Path) -> tuple[AppConfig | None, list[str]]:
             data_dir=data_dir,
             draft_provider=provider,
             webhook_enabled=webhook_enabled,
+            webhook_auth_mode=webhook_auth_mode,
             webhook_url=webhook_url,
             webhook_secret_env=webhook_secret_env,
             webhook_allow_network=webhook_allow_network,
+            webhook_key_source=webhook_key_source,
             alert_sink_enabled=alert_enabled,
             alert_sink_url=alert_url,
             model_enabled=model_enabled,
@@ -241,12 +262,28 @@ def readiness_problems(config: AppConfig, mapping: dict[str, Any] | None) -> lis
         problems.append("mode_invalid")
     if config.mode == "fixture" and (config.fixture_path is None or not config.fixture_path.is_file()):
         problems.append("fixture_missing")
-    if config.draft_provider == "webhook" and config.webhook_enabled:
+    if (
+        config.draft_provider == "webhook"
+        and config.webhook_enabled
+        and config.webhook_auth_mode == "hmac"
+    ):
         import os
 
         if not os.environ.get(config.webhook_secret_env):
             problems.append("webhook_secret_missing")
     return problems
+
+
+def urlsplit_has_secret(url: str) -> bool:
+    from urllib.parse import parse_qsl, urlsplit
+
+    parts = urlsplit(url)
+    if parts.username or parts.password or parts.fragment:
+        return True
+    for key, _value in parse_qsl(parts.query, keep_blank_values=True):
+        if key.lower() in {"key", "token", "secret", "access_token", "authorization"}:
+            return True
+    return False
 
 
 def load_mapping_for(config: AppConfig) -> tuple[dict[str, Any] | None, list[str]]:

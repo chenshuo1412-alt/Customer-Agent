@@ -48,6 +48,20 @@ python -m inbox_collector login-prep --config config.login-prep.example.json
 
 Profile 里会留下登录态，只放在本机，不要复制、同步或提交。程序不读取 Cookie 文件。
 
+当前已经打开的专用 Chrome 不要为了新代码重启。`diagnose-dom` 不会另开浏览器，也不会附着你原来的 Chrome。它只请求**正在运行的新版** `login-prep` 导出当前页的标签名、属性名和安全 class 结构。客户正文、身份、原始 id 和 URL 查询不会写出。`data-v-*` 和 `tabindex` 只记为不稳定，不会当成选择器。
+
+没有进程在听时，结果是 `diagnostic_error` / `listener_not_running`，`nodes` 为 null。空结果不是“平台不支持”。字段不存在、会话未选中、诊断失败是三种不同状态。
+
+```bash
+python -m inbox_collector diagnose-dom --data-dir data --timeout-seconds 2
+```
+
+这次代码不会替你执行这条命令去碰已经登录的窗口。先在本机用测试看结构导出：
+
+```bash
+python -m unittest tests.test_dom_diagnose tests.test_browser_e2e.BrowserE2ETest.test_diagnose_uses_the_open_page_without_navigation -b
+```
+
 采集仍然要等真实 DOM 核对之后。在那之前：
 
 ```bash

@@ -311,6 +311,42 @@ class BrowserE2ETest(unittest.TestCase):
         self.assertFalse(saved["restart_duplicate_inbound"])
         self.assertTrue(os.access(evidence_dir, os.W_OK))
 
+    def test_diagnose_uses_the_open_page_without_navigation(self) -> None:
+        from inbox_collector.dom_diagnose import export_rendered_dom, service_diagnose_request
+
+        self.html_path.write_text(
+            "<!DOCTYPE html><body><section class='shell' "
+            "data-conversation-selected='false' data-v-secret tabindex='1'>"
+            "<a href='https://example.invalid/buyer?token=secret'>买家张三</a>"
+            "</section></body></html>",
+            encoding="utf-8",
+        )
+        from inbox_collector.browser_session import DedicatedBrowser
+
+        browser = DedicatedBrowser(self.data / "diag-profile")
+        browser.start()
+        self.addCleanup(browser.close)
+        browser.page.goto(f"http://127.0.0.1:{self.port}/inbox.html")
+        before = browser.page.url
+        pid = browser.pid
+        report = export_rendered_dom(browser.page, timeout_seconds=2)
+        self.assertEqual(browser.page.url, before)
+        self.assertEqual(browser.pid, pid)
+        rendered = json.dumps(report, ensure_ascii=False)
+        self.assertNotIn("张三", rendered)
+        self.assertNotIn("token=secret", rendered)
+        self.assertNotIn("data-v-secret", rendered)
+        self.assertEqual(report["status"], "conversation_not_selected")
+        self.assertTrue(report["nodes"])
+        self.assertFalse(report["platform_unsupported"])
+        request = self.data / "dom-diagnose.request"
+        request.write_text("{}\n", encoding="utf-8")
+        service_diagnose_request(browser.page, self.data)
+        saved = json.loads((self.data / "dom-diagnose.result.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["status"], "conversation_not_selected")
+        self.assertEqual(browser.page.url, before)
+        self.assertFalse(request.exists())
+
     def test_login_page_alerts_locally_without_typing(self) -> None:
         self.html_path.write_text(
             (ROOT / "fixtures" / "browser_login.html").read_text(encoding="utf-8"),

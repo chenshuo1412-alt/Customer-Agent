@@ -440,6 +440,7 @@ class CollectorTest(unittest.TestCase):
             draft_provider="webhook",
             webhook={
                 "enabled": True,
+                "auth_mode": "hmac",
                 "url": "https://collector.invalid/hook",
                 "webhook_secret_env": "INBOX_TEST_WEBHOOK_SECRET",
                 "allow_network": False,
@@ -466,6 +467,7 @@ class CollectorTest(unittest.TestCase):
             draft_provider="webhook",
             webhook={
                 "enabled": True,
+                "auth_mode": "hmac",
                 "url": "https://collector.invalid/hook",
                 "webhook_secret_env": "INBOX_TEST_WEBHOOK_SECRET",
                 "allow_network": True,
@@ -500,6 +502,7 @@ class CollectorTest(unittest.TestCase):
             draft_provider="webhook",
             webhook={
                 "enabled": True,
+                "auth_mode": "hmac",
                 "url": "https://collector.invalid/hook",
                 "webhook_secret_env": "INBOX_TEST_WEBHOOK_SECRET",
                 "allow_network": True,

@@ -12,6 +12,10 @@ ALLOWED_DRAFT_STATUSES = frozenset(
         "webhook_held",
         "webhook_transport_failed",
         "webhook_transport_accepted_awaiting_receipt",
+        "pending",
+        "accepted",
+        "draft_ready",
+        "failed",
     }
 )
 
@@ -29,7 +33,7 @@ FORBIDDEN_DRAFT_STATUSES = frozenset(
 CANNED_DRAFT_TEXT = "【模拟草稿】这是本地示例，不是真实客服回复，也没有发送给买家。"
 PENDING_REASON = "未配置草稿生成器，待生成。没有伪造客户回复。"
 MODEL_UNVERIFIED_REASON = "独立模型通道未验证，本版本不调用云 API，也不伪造回复。"
-DISCLAIMER = "未连接真实店铺。未向买家发送。Webhook 投递成功也不等于回复草稿已返回。"
+DISCLAIMER = "未连接真实店铺。未向买家发送。HTTP 200 只表示已接受，不等于草稿已返回。"
 
 
 class SafetyError(RuntimeError):

@@ -39,7 +39,19 @@ def _mapping_and_runner(config: AppConfig, *, transport: object | None = None) -
             allow_network=config.webhook_allow_network,
             transport=transport if callable(transport) else None,
         )
-    provider = provider_for(config.draft_provider, webhook=webhook)
+    if config.draft_provider == "routine_bearer":
+        from inbox_collector.keychain import MacKeychainStore, MemorySecretStore
+        from inbox_collector.routine import RoutineBearerProvider
+
+        secret_store = MacKeychainStore() if MacKeychainStore.available() else MemorySecretStore()
+        provider = RoutineBearerProvider(
+            config.webhook_url,
+            secret_store,
+            allow_network=config.webhook_allow_network,
+            transport=transport if callable(transport) else None,
+        )
+    else:
+        provider = provider_for(config.draft_provider, webhook=webhook)
     source = None
     problems = readiness_problems(config, mapping)
     if config.mode == "fixture" and not problems and config.fixture_path is not None:
@@ -109,6 +121,44 @@ def cmd_validate_mapping(path: Path) -> int:
         }
     )
     return 0 if local_ok or merchant_ok else 2
+
+
+def cmd_diagnose_dom(data_dir: Path, timeout_seconds: float) -> int:
+    """Ask the already-running login-prep process. Never starts a browser."""
+    from inbox_collector.dom_diagnose import wait_for_diagnose_result
+
+    if timeout_seconds <= 0:
+        _print({"status": "diagnostic_error", "reason": "timeout_invalid", "platform_unsupported": False, "nodes": None})
+        return 2
+    data_dir.mkdir(parents=True, exist_ok=True)
+    payload = wait_for_diagnose_result(data_dir, timeout_seconds=timeout_seconds)
+    _print(payload)
+    return 0 if payload.get("status") not in {None, "diagnostic_error"} else 2
+
+
+def cmd_routine_setup(url: str, config_path: Path) -> int:
+    """Prompt for a key only after Keychain is available. There is no --key argument."""
+    from inbox_collector.keychain import MacKeychainStore
+
+    if not MacKeychainStore.available():
+        _print(
+            {
+                "ok": False,
+                "problems": ["keychain_unavailable"],
+                "production_running": False,
+                "real_store_connected": False,
+            }
+        )
+        return 2
+    import getpass
+
+    secret = getpass.getpass("Routine sender key: ")
+    from inbox_collector.routine import save_routine_setup
+
+    result = save_routine_setup(url=url, secret=secret, store=MacKeychainStore(), config_path=str(config_path))
+    result.pop("secret", None)
+    _print(result)
+    return 0 if result.get("ok") else 2
 
 
 def cmd_login_prep(config_path: Path) -> int:
@@ -290,6 +340,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     plan = sub.add_parser("browser-plan")
     plan.add_argument("--config", type=Path, required=True)
+
+    diagnose = sub.add_parser("diagnose-dom")
+    diagnose.add_argument("--data-dir", type=Path, required=True)
+    diagnose.add_argument("--timeout-seconds", type=float, default=2.0)
+
+    routine_setup = sub.add_parser("routine-setup")
+    routine_setup.add_argument("--url", required=True)
+    routine_setup.add_argument("--config", type=Path, required=True)
     return parser
 
 
@@ -322,6 +380,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_demo(args.data_dir)
     if args.command == "login-prep":
         return cmd_login_prep(args.config)
+    if args.command == "diagnose-dom":
+        return cmd_diagnose_dom(args.data_dir, args.timeout_seconds)
+    if args.command == "routine-setup":
+        return cmd_routine_setup(args.url, args.config)
     if args.command == "browser-plan":
         config, problems = load_config(args.config)
         if config is None:

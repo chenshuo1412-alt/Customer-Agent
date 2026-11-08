@@ -11,6 +11,7 @@ from pathlib import Path
 
 from inbox_collector.models import ObservedMessage, Snapshot, parse_aware_time
 from inbox_collector.providers import WebhookProvider
+from inbox_collector.routine import RoutineBearerProvider
 from inbox_collector.safety import DISCLAIMER, assert_draft_status
 from inbox_collector.store import Store, utc_now
 
@@ -124,16 +125,27 @@ class Pipeline:
                     )
                     created += 1
                     continue
-                if isinstance(self.provider, WebhookProvider):
+                if isinstance(self.provider, (WebhookProvider, RoutineBearerProvider)):
                     event_id = str(uuid.uuid4())
                     payload = self.provider.payload(event_id, conversation_key, messages)
-                    reason = None if self.provider.network_allowed() else "network_disabled"
+                    if isinstance(self.provider, RoutineBearerProvider):
+                        status = "pending"
+                        provider_name = "routine_bearer"
+                        synthetic = 1
+                        reason = None if self.provider.network_allowed() else (
+                            "routine_key_missing" if not self.provider.secret_store.get() else "network_disabled"
+                        )
+                    else:
+                        status = "webhook_held"
+                        provider_name = "webhook"
+                        synthetic = 0
+                        reason = None if self.provider.network_allowed() else "network_disabled"
                     self._write_draft(
                         conversation_key=conversation_key,
                         hashes=hashes,
-                        status="webhook_held",
-                        provider="webhook",
-                        synthetic=0,
+                        status=status,
+                        provider=provider_name,
+                        synthetic=synthetic,
                         draft_text=None,
                         reason=reason,
                         event_payload=(event_id, payload, reason),
@@ -157,13 +169,19 @@ class Pipeline:
         return created
 
     def transmit_pending(self) -> None:
-        if not isinstance(self.provider, WebhookProvider) or not self.provider.network_allowed():
+        if isinstance(self.provider, RoutineBearerProvider):
+            if not self.provider.network_allowed():
+                return
+            # Rate-limit and auth failures are not retried. Accepted events stay accepted.
+            pending = [row for row in self.store.outbox_rows() if row["status"] == "pending"]
+        elif isinstance(self.provider, WebhookProvider) and self.provider.network_allowed():
+            pending = [
+                row
+                for row in self.store.outbox_rows()
+                if row["status"] in {"webhook_held", "webhook_transport_failed"}
+            ]
+        else:
             return
-        pending = [
-            row
-            for row in self.store.outbox_rows()
-            if row["status"] in {"webhook_held", "webhook_transport_failed"}
-        ]
         for row in pending:
             payload = json.loads(str(row["payload_json"]))
             status, error = self.provider.transmit(payload)

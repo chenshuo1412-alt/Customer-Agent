@@ -56,7 +56,7 @@ def run_login_prep(
             store.open_alert("login_prep_left_allowed_page")
             store.set_state("paused", "login_prep_left_allowed_page")
             return _finish(store, config, mapping, opened_host)
-        _wait_for_close(browser.page, hold_seconds)
+        _wait_for_close(browser.page, hold_seconds, config.data_dir)
         store.set_state("stopped", "login_prep_closed")
     except BrowserLaunchRefused as exc:
         store.open_alert(exc.code)
@@ -69,9 +69,12 @@ def run_login_prep(
     return _finish(store, config, mapping, opened_host)
 
 
-def _wait_for_close(page: Any, hold_seconds: float | None) -> None:
+def _wait_for_close(page: Any, hold_seconds: float | None, data_dir: Any) -> None:
+    from inbox_collector.dom_diagnose import service_diagnose_request
+
     started = time.monotonic()
     while not page.is_closed():
+        service_diagnose_request(page, data_dir)
         if hold_seconds is not None and time.monotonic() - started >= hold_seconds:
             return
         time.sleep(0.2)

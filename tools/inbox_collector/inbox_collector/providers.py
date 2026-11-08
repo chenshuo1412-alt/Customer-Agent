@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import urllib.error
 import urllib.request
 from typing import Any, Callable
 
@@ -39,9 +40,12 @@ def urllib_transport(url: str, body: bytes, headers: dict[str, str]) -> int:
     if not url.startswith("https://"):
         raise OutboundDisabled("webhook_url_not_https")
     request = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    with urllib.request.urlopen(request, timeout=10) as response:
-        response.read()
-        return int(response.status)
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            response.read()
+            return int(response.status)
+    except urllib.error.HTTPError as exc:
+        return int(exc.code)
 
 
 class MockProvider:

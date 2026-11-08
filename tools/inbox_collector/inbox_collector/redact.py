@@ -5,7 +5,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from pathlib import Path
+
+_BEARER = re.compile(r"Bearer\s+\S+", re.IGNORECASE)
+_QUERY_SECRET = re.compile(r"([?&](?:key|token|secret|access_token|authorization)=)[^&\s]+", re.IGNORECASE)
 
 LOGGER_NAME = "inbox_collector"
 _ALLOWED_FIELDS = {"state", "count", "mode", "alert", "attempt"}
@@ -21,6 +25,8 @@ class RedactFilter(logging.Filter):
         for secret in self._secrets:
             if secret in message:
                 message = message.replace(secret, "[redacted]")
+        message = _BEARER.sub("Bearer [redacted]", message)
+        message = _QUERY_SECRET.sub(r"\1[redacted]", message)
         record.msg = message
         record.args = ()
         return True
