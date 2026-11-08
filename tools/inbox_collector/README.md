@@ -91,10 +91,10 @@ python -m inbox_collector confirmed-text-send --data-dir data --challenge '客�
 已经发生过的不确定发送不能靠新授权、新窗口标记或另一个 data 目录复活。下面的只读命令不创建授权：
 
 ```bash
-python -m inbox_collector diagnose-dom --data-dir data --timeout-seconds 5 --op input-state-readonly --probe-phrase '客服配对1109-A7'
+python -m inbox_collector diagnose-dom --data-dir data --timeout-seconds 5 --op input-state-readonly --probe-phrase '客服配对1109-B8' --candidate-reply '新链路测试B8收到。'
 ```
 
-它只返回输入框是否非空、是否等于已授权原文、发送控件的标签和安全 class、可见验证码或错误标志，以及面板里精确匹配原文的条数。不导出其它输入框或客户文字，不点击。退出码 0 只表示读完了，不表示已发送或已送达。
+这条只读命令不读取、不改写现有授权文件，也不创建新的授权或 `confirmed-text.attempts/`。`--candidate-reply` 只在这个只读操作里有效，不能拿去打开发送。退出码 0 只表示 `status` 是 `input_state_ready`。同时看 `authorization_used`、`send_authorized`、`buyer_source_confirmed` 都是 false，`files_unchanged` 是 true，`production_send_allowed` 和 `delivery_claimed` 都是 false。`match_count` 为 1 才表示这句挑战在当前消息面板里恰好一条。`input_nonempty` 和 `input_equals_candidate` 只比较候选原文。`send_control_unique`、`send_control_visible`、`send_control_disabled` 和 `send_control_exact` 描述发送控件。`reply_exact_count`、`visible_captcha`、`visible_error` 是计数和布尔值。结果不包含其它客户原文，也不把旧授权里的句子当成这次候选。
 
 只对这一句发送一次，不是全店托管：
 

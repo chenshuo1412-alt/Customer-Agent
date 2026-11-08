@@ -180,10 +180,31 @@ def cmd_diagnose_dom(
     probe_phrase: str = "",
     op: str = "probe",
     keep_local_detail: bool = False,
+    candidate_reply: str = "",
 ) -> int:
     """Ask the already-running login-prep process. Never starts a browser."""
     from inbox_collector.dom_diagnose import wait_for_diagnose_result
 
+    if candidate_reply and op != "input-state-readonly":
+        _print(
+            {
+                "status": "candidate_reply_not_a_send",
+                "production_send_allowed": False,
+                "send_authorized": False,
+                "authorization_used": False,
+            }
+        )
+        return 2
+    if op == "input-state-readonly" and not candidate_reply:
+        _print(
+            {
+                "status": "candidate_reply_required",
+                "production_send_allowed": False,
+                "send_authorized": False,
+                "authorization_used": False,
+            }
+        )
+        return 2
     if timeout_seconds <= 0:
         _print({"status": "diagnostic_error", "reason": "timeout_invalid", "platform_unsupported": False, "nodes": None})
         return 2
@@ -194,6 +215,7 @@ def cmd_diagnose_dom(
         probe_phrase=probe_phrase,
         op=op,
         keep_local_detail=keep_local_detail,
+        candidate_reply=candidate_reply,
     )
     if (
         summary
@@ -434,6 +456,7 @@ def build_parser() -> argparse.ArgumentParser:
     diagnose.add_argument("--probe-phrase", default="")
     diagnose.add_argument("--op", default="probe")
     diagnose.add_argument("--keep-local-detail", action="store_true")
+    diagnose.add_argument("--candidate-reply", default="")
 
     test_send = sub.add_parser("test-send")
     test_send.add_argument("--data-dir", type=Path, required=True)
@@ -498,6 +521,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             probe_phrase=args.probe_phrase,
             op=args.op,
             keep_local_detail=args.keep_local_detail,
+            candidate_reply=args.candidate_reply,
         )
     if args.command == "test-send":
         from inbox_collector.dom_diagnose import wait_for_diagnose_result

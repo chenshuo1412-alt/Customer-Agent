@@ -422,8 +422,7 @@ class ConfirmedTextTest(unittest.TestCase):
             "<div class='content-box panel-a' style='width:640px'>"
             f"<li class='onemsg' id='{_ROW_ID}'><div class='msg-content'>{_CHALLENGE}</div></li>"
             "<div class='reply-box'><textarea id='composer' class='custom-scroll'></textarea>"
-            "<button id='send' type='button' class='send-btn'>发送</button></div>"
-            "<div class='captcha'>验证码</div></div>"
+            "<button id='send' type='button' class='send-btn'>发送</button></div></div>"
             "<textarea id='other'>客户秘密</textarea>"
             "<script>window.__model='';window.__sent=0;"
             "const field=document.querySelector('#composer');"
@@ -510,7 +509,7 @@ class ConfirmedTextTest(unittest.TestCase):
                 self.assertTrue(report["input_state"]["input_nonempty"])
                 self.assertEqual(report["input_state"]["reply_exact_count"], 0)
                 self.assertEqual(report["input_state"]["reply_age"], "unproven_single_snapshot")
-                self.assertTrue(report["input_state"]["visible_captcha"])
+                self.assertFalse(report["input_state"]["visible_captcha"])
                 self.assertTrue(report["ledger_sealed"])
                 self.assertFalse(report["retry_allowed"])
                 self.assertFalse(report["window_matches"])
@@ -788,6 +787,97 @@ class ConfirmedTextTest(unittest.TestCase):
                 self.assertEqual(blocked["status"], "attempt_consumed")
                 self.assertEqual(page.evaluate("() => window.__sent"), 1)
                 browser.close()
+
+    def test_candidate_reply_preflight_does_not_use_or_write_auth(self) -> None:
+        from playwright.sync_api import sync_playwright
+
+        from inbox_collector.cli import main
+
+        html = (
+            "<!DOCTYPE html><html><body><div class='content-box' style='width:640px'>"
+            f"<li class='onemsg'><div class='msg-content'>{_NEW_CHALLENGE}</div></li>"
+            "<div class='reply-box'><textarea></textarea><button type='button'>发送</button></div>"
+            "</div><textarea>客户秘密</textarea></body></html>"
+        )
+        with TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            original = plant_legacy(data, _CHALLENGE, _REPLY)
+            write_authorization(data, challenge=_CHALLENGE, reply=_REPLY, window_id="ab" * 16, expires_at=time.time() + 60)
+            auth_bytes = (data / "confirmed-text.auth.json").read_bytes()
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(headless=True)
+                page = browser.new_page()
+                page.set_content(html)
+                (data / "dom-diagnose.request").write_text(
+                    json.dumps(
+                        {"op": "input-state-readonly", "probe_phrase": _NEW_CHALLENGE, "candidate_reply": _NEW_REPLY},
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+                service_diagnose_request(page, data, window_id="zz" * 16)
+                report = json.loads((data / "dom-diagnose.result.json").read_text(encoding="utf-8"))
+                blob = json.dumps(report, ensure_ascii=False)
+                self.assertEqual(report["status"], "input_state_ready")
+                self.assertEqual(report["match_count"], 1)
+                self.assertFalse(report["input_nonempty"])
+                self.assertFalse(report["input_equals_candidate"])
+                self.assertTrue(report["send_control_unique"])
+                self.assertTrue(report["send_control_visible"])
+                self.assertFalse(report["send_control_disabled"])
+                self.assertTrue(report["send_control_exact"])
+                self.assertEqual(report["reply_exact_count"], 0)
+                self.assertFalse(report["visible_captcha"])
+                self.assertFalse(report["visible_error"])
+                self.assertTrue(report["files_unchanged"])
+                self.assertFalse(report["authorization_used"])
+                self.assertFalse(report["send_authorized"])
+                self.assertFalse(report["buyer_source_confirmed"])
+                self.assertFalse(report["production_send_allowed"])
+                self.assertFalse((data / "confirmed-text.attempts").exists())
+                self.assertEqual((data / "confirmed-text.auth.json").read_bytes(), auth_bytes)
+                self.assertEqual((data / "confirmed-text.ledger.json").read_bytes(), original)
+                self.assertNotIn(_NEW_REPLY, blob)
+                self.assertNotIn(_REPLY, blob)
+                self.assertNotIn("客户秘密", blob)
+                page.set_content(html.replace(f"{_NEW_CHALLENGE}", _CHALLENGE))
+                (data / "dom-diagnose.request").write_text(
+                    json.dumps(
+                        {"op": "input-state-readonly", "probe_phrase": _NEW_CHALLENGE, "candidate_reply": _NEW_REPLY},
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+                service_diagnose_request(page, data, window_id="zz" * 16)
+                wrong = json.loads((data / "dom-diagnose.result.json").read_text(encoding="utf-8"))
+                self.assertEqual(wrong["status"], "challenge_absent")
+                self.assertEqual(wrong["match_count"], 0)
+                self.assertFalse(wrong["authorization_used"])
+                self.assertEqual((data / "confirmed-text.auth.json").read_bytes(), auth_bytes)
+                page.set_content(html.replace("</div></div>", "<div class='captcha'>验证码</div></div></div>"))
+                write_authorization(data, challenge=_NEW_CHALLENGE, reply=_NEW_REPLY, window_id="ab" * 16, expires_at=time.time() + 60)
+                blocked = run_confirmed_text(page, data, _NEW_CHALLENGE, window_id="ab" * 16, receipt_wait_seconds=0.2)
+                self.assertEqual(blocked["status"], "visible_captcha")
+                self.assertFalse(blocked["input_attempted"])
+                self.assertFalse((data / "confirmed-text.attempts").exists())
+                self.assertEqual((data / "confirmed-text.ledger.json").read_bytes(), original)
+                browser.close()
+            code = main(
+                [
+                    "diagnose-dom",
+                    "--data-dir",
+                    str(data),
+                    "--op",
+                    "confirmed-text",
+                    "--probe-phrase",
+                    _NEW_CHALLENGE,
+                    "--candidate-reply",
+                    _NEW_REPLY,
+                    "--timeout-seconds",
+                    "1",
+                ]
+            )
+            self.assertEqual(code, 2)
 
 
 if __name__ == "__main__":

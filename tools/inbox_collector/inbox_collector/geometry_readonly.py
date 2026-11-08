@@ -590,7 +590,7 @@ def reject_request(payload: Any) -> dict[str, Any] | None:
         "probe": {"op", "probe_phrase"},
         "test-send": {"op", "probe_phrase"},
         "confirmed-text": {"op", "probe_phrase"},
-        "input-state-readonly": {"op", "probe_phrase"},
+        "input-state-readonly": {"op", "probe_phrase", "candidate_reply"},
         "geometry-readonly": _ALLOWED_FIELDS,
     }
     if op not in allowed:
@@ -607,6 +607,11 @@ def reject_request(payload: Any) -> dict[str, Any] | None:
         return report
     if op in {"geometry-readonly", "confirmed-text", "input-state-readonly"} and not isinstance(payload.get("probe_phrase"), str):
         report = _empty_report("phrase_absent", "phrase_absent")
+        return report
+    if op == "input-state-readonly" and "candidate_reply" in payload and not isinstance(payload.get("candidate_reply"), str):
+        report = _empty_report("field_rejected", "field_rejected")
+        report["handler"] = "request-router"
+        report["rejected_fields"] = ["candidate_reply"]
         return report
     if "keep_local_detail" in payload and payload.get("keep_local_detail") is not True and payload.get("keep_local_detail") is not False:
         report = _empty_report("field_rejected", "field_rejected")

@@ -1722,7 +1722,8 @@ def service_diagnose_request(
     elif isinstance(payload, dict) and payload.get("op") == "input-state-readonly":
         from inbox_collector.confirmed_text import run_input_state
 
-        result = run_input_state(page, data_dir, phrase, window_id=window_id)
+        candidate = payload.get("candidate_reply") if isinstance(payload.get("candidate_reply"), str) else None
+        result = run_input_state(page, data_dir, phrase, window_id=window_id, candidate_reply=candidate)
     elif isinstance(payload, dict) and payload.get("op") == "geometry-readonly":
         result = run_geometry(
             page,
@@ -1747,6 +1748,7 @@ def wait_for_diagnose_result(
     probe_phrase: str = "",
     op: str = "probe",
     keep_local_detail: bool = False,
+    candidate_reply: str = "",
 ) -> dict[str, Any]:
     """Ask the already-running owner to export. This function does not launch a browser."""
     import time
@@ -1762,6 +1764,8 @@ def wait_for_diagnose_result(
         body["probe_phrase"] = probe_phrase
     if keep_local_detail:
         body["keep_local_detail"] = True
+    if candidate_reply:
+        body["candidate_reply"] = candidate_reply
     request.write_text(json.dumps(body, ensure_ascii=False) + "\n", encoding="utf-8")
     os.chmod(request, 0o600)
     deadline = time.monotonic() + timeout_seconds

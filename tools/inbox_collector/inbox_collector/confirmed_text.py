@@ -164,6 +164,8 @@ _READ_JS = (
     reply_visible_count: 0,
     panel_fingerprint: "",
     row_id_raw: "",
+    visible_captcha: false,
+    visible_error: false,
     clicked: false,
     mutated: false
   };
@@ -174,6 +176,13 @@ _READ_JS = (
   base.panel_fingerprint = [part(located.box), part(located.row), part(located.composer)].join("|");
   base.row_id_raw = usableId(located.row.getAttribute && located.row.getAttribute("id"));
   if (located.field) base.input_empty = String(located.field.value || "") === "";
+  for (const node of Array.from(located.box.querySelectorAll("*")).slice(0, 40)) {
+    if (hidden(node)) continue;
+    const tokens = safeTokens(node);
+    const leaf = ownText(node);
+    if (tokens.some((token) => /captcha|geetest/i.test(token)) || leaf === "验证码") base.visible_captcha = true;
+    if (tokens.some((token) => /^(?:error|is-error|alert)$/i.test(token)) || leaf === "发送失败" || leaf === "网络异常") base.visible_error = true;
+  }
   return base;
 }
 """
@@ -546,7 +555,34 @@ def _load_auth(
     return None, payload
 
 
+def _observe_block(raw: dict[str, Any]) -> str | None:
+    """Refuse a send when the fresh panel read shows captcha, an error, or a bad composer."""
+    if raw.get("visible_captcha") is True:
+        return "visible_captcha"
+    if raw.get("visible_error") is True:
+        return "visible_error"
+    count = int(raw.get("match_count") or 0)
+    if count == 0:
+        return "challenge_absent"
+    if count != 1:
+        return "challenge_not_unique"
+    if int(raw.get("reply_exact_count") or 0) != 0:
+        return "reply_already_visible"
+    if int(raw.get("input_count") or 0) != 1 or raw.get("input_nonempty") is not False:
+        return "draft_present" if raw.get("input_nonempty") is True else "input_not_verified"
+    sender = raw.get("sender") if isinstance(raw.get("sender"), dict) else None
+    if int(raw.get("sender_count") or 0) != 1 or sender is None:
+        return "send_control_not_verified"
+    if sender.get("visible") is not True or sender.get("disabled") is True or sender.get("label_kind") not in {"send", "send_with_shortcut"}:
+        return "send_control_not_verified"
+    return None
+
+
 def _read_gate(raw: dict[str, Any]) -> str | None:
+    if raw.get("visible_captcha") is True:
+        return "visible_captcha"
+    if raw.get("visible_error") is True:
+        return "visible_error"
     count = int(raw.get("match_count") or 0)
     if count == 0:
         return "challenge_absent"
@@ -604,6 +640,21 @@ def _observe(page: Any, challenge: str, reply: str) -> dict[str, Any]:
     return _clean_state(raw)
 
 
+def _attempts_signature(data_dir: Path) -> bytes | None:
+    root = data_dir / _ATTEMPTS
+    if not root.exists():
+        return None
+    chunks: list[bytes] = []
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            chunks.append(path.relative_to(root).as_posix().encode("utf-8") + b"\0" + path.read_bytes())
+    return b"\n".join(chunks)
+
+
+def _files_unchanged(data_dir: Path, auth_before: bytes | None, ledger_before: bytes | None, attempts_before: bytes | None) -> bool:
+    return _auth_bytes(data_dir) == auth_before and _ledger_bytes(data_dir) == ledger_before and _attempts_signature(data_dir) == attempts_before
+
+
 def run_input_state(
     page: Any,
     data_dir: Path,
@@ -611,27 +662,47 @@ def run_input_state(
     *,
     window_id: str | None,
     now: float | None = None,
+    candidate_reply: str | None = None,
 ) -> dict[str, Any]:
-    """Read booleans for the authorized reply. Does not type, click, or rewrite the ledger."""
+    """Read booleans for one candidate sentence. A candidate does not authorize a send."""
     moment = time.time() if now is None else now
-    before = _auth_bytes(data_dir)
+    auth_before = _auth_bytes(data_dir)
     ledger_before = _ledger_bytes(data_dir)
-    problem, auth = _load_auth(data_dir, challenge, window_id, moment, allow_stale_window=True)
+    attempts_before = _attempts_signature(data_dir)
     sealed = _ledger_state(data_dir)
-    if problem or auth is None:
-        report = _report(problem or "authorization_missing", handler="input-state-readonly", op="input-state-readonly")
-        report["ledger_sealed"] = sealed is not None
-        report["retry_allowed"] = False
-        return report
-    reply = str(auth["reply_text"])
+    explicit = candidate_reply is not None
+    if explicit:
+        if reply_problem(candidate_reply or "") or not challenge.strip():
+            report = _report("candidate_rejected", handler="input-state-readonly", op="input-state-readonly", ledger_sealed=sealed is not None)
+            report.update(_readonly_flags(False))
+            report["files_unchanged"] = _files_unchanged(data_dir, auth_before, ledger_before, attempts_before)
+            return report
+        reply = candidate_reply or ""
+        auth = None
+    else:
+        problem, auth = _load_auth(data_dir, challenge, window_id, moment, allow_stale_window=True)
+        if problem or auth is None:
+            report = _report(problem or "authorization_missing", handler="input-state-readonly", op="input-state-readonly")
+            report["ledger_sealed"] = sealed is not None
+            report["retry_allowed"] = False
+            report["files_unchanged"] = _files_unchanged(data_dir, auth_before, ledger_before, attempts_before)
+            return report
+        reply = str(auth["reply_text"])
     try:
         raw = page.evaluate(_OBSERVE_JS, {"challenge": challenge, "reply": reply})
     except Exception as exc:
-        return _report("evaluate_failed", handler="input-state-readonly", op="input-state-readonly", error_type=type(exc).__name__, ledger_sealed=sealed is not None)
+        report = _report("evaluate_failed", handler="input-state-readonly", op="input-state-readonly", error_type=type(exc).__name__, ledger_sealed=sealed is not None)
+        report.update(_readonly_flags(not explicit))
+        report["files_unchanged"] = _files_unchanged(data_dir, auth_before, ledger_before, attempts_before)
+        return report
     if not isinstance(raw, dict) or raw.get("marker") != "INPUT_STATE_READONLY":
-        return _report("evaluate_invalid", handler="input-state-readonly", op="input-state-readonly", ledger_sealed=sealed is not None)
+        report = _report("evaluate_invalid", handler="input-state-readonly", op="input-state-readonly", ledger_sealed=sealed is not None)
+        report.update(_readonly_flags(not explicit))
+        report["files_unchanged"] = _files_unchanged(data_dir, auth_before, ledger_before, attempts_before)
+        return report
     state = _clean_state(raw)
     status = "input_state_ready" if int(raw.get("match_count") or 0) == 1 else "challenge_absent" if int(raw.get("match_count") or 0) == 0 else "challenge_not_unique"
+    sender = state.get("sender") if isinstance(state.get("sender"), dict) else None
     report = _report(
         status,
         error=None if status == "input_state_ready" else status,
@@ -640,11 +711,32 @@ def run_input_state(
         match_count=state["match_count"],
         ledger_sealed=sealed is not None,
         input_state=state,
-        window_matches=auth.get("window_id") == window_id,
-        authorization_expired=float(auth.get("expires_at") or 0) < moment,
-        files_unchanged=_auth_bytes(data_dir) == before and _ledger_bytes(data_dir) == ledger_before,
+        input_nonempty=state["input_nonempty"],
+        input_equals_candidate=state["input_equals_reply"],
+        send_control_unique=state["sender_count"] == 1,
+        send_control_visible=bool(sender and sender.get("visible") is True),
+        send_control_disabled=bool(sender and sender.get("disabled") is True),
+        send_control_exact=bool(sender and sender.get("label_kind") in {"send", "send_with_shortcut"}),
+        reply_exact_count=state["reply_exact_count"],
+        visible_captcha=state["visible_captcha"],
+        visible_error=state["visible_error"],
+        window_matches=None if explicit or auth is None else auth.get("window_id") == window_id,
+        authorization_expired=None if explicit or auth is None else float(auth.get("expires_at") or 0) < moment,
+        files_unchanged=_files_unchanged(data_dir, auth_before, ledger_before, attempts_before),
     )
+    report.update(_readonly_flags(not explicit))
     return _leak_guard(report, challenge, reply)
+
+
+def _readonly_flags(authorization_used: bool) -> dict[str, Any]:
+    return {
+        "authorization_used": authorization_used,
+        "send_authorized": False,
+        "buyer_source_confirmed": False,
+        "attempts_created": False,
+        "production_send_allowed": False,
+        "delivery_claimed": False,
+    }
 
 
 def _auth_bytes(data_dir: Path) -> bytes | None:
@@ -719,6 +811,10 @@ def run_confirmed_text(
     if not isinstance(recheck, dict) or recheck.get("marker") != "INPUT_STATE_READONLY":
         _mark_attempt(data_dir, challenge, reply, "uncertain")
         return _with_legacy(data_dir, legacy_before, _report("paused_uncertain", ledger_sealed=True, receipt="absent", **context))
+    blocked_now = _observe_block(recheck)
+    if blocked_now:
+        _mark_attempt(data_dir, challenge, reply, "revoked")
+        return _with_legacy(data_dir, legacy_before, _leak_guard(_report(blocked_now, ledger_sealed=True, input_state=_clean_state(recheck), **context), challenge, reply))
     if recheck.get("panel_fingerprint") != raw.get("panel_fingerprint") or str(recheck.get("row_id_raw") or "") != str(raw.get("row_id_raw") or ""):
         _mark_attempt(data_dir, challenge, reply, "revoked")
         return _with_legacy(data_dir, legacy_before, _leak_guard(_report("panel_changed", ledger_sealed=True, input_state=_clean_state(recheck, before=int(recheck.get("reply_exact_count") or 0)), **context), challenge, reply))
