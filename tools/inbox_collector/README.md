@@ -42,7 +42,7 @@ source .venv/bin/activate
 python -m inbox_collector login-prep --config config.login-prep.example.json
 ```
 
-这会新建 `data/own-browser-profile`（权限仅本人可读写），并用有界面浏览器打开 `https://mms.pinduoduo.com/chat-merchant/index.html#/`。macOS 上如果装了 Chrome，会用这个新 profile 启动 `/Applications/Google Chrome.app`，不会打开现有 Chrome 用户目录，也不会附着已经在跑的窗口。请自己登录。关掉窗口后进程结束。
+这会新建 `data/own-browser-profile`（权限仅本人可读写），并用有界面浏览器打开 `https://mms.pinduoduo.com/chat-merchant/index.html#/`。未登录时站点会跳到 `https://mms.pinduoduo.com/login/`，并带上只指回该客服页的 `redirectUrl`。这个跳转会留在窗口里。其它域名、发送接口、或指向站外的 `redirectUrl` 会关闭窗口。macOS 上如果装了 Chrome，会用这个新 profile 启动 `/Applications/Google Chrome.app`，不会打开现有 Chrome 用户目录，也不会附着已经在跑的窗口。请自己登录。关掉窗口后进程结束。
 
 这一步不采集消息、不生成草稿、不调用 Webhook。`real_store_login_verified` 仍是 false，`production_running` 仍是 false。`run` 不能代替 `login-prep`，采集模式仍然拒绝这个商家地址。
 

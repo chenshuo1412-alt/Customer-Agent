@@ -131,6 +131,18 @@ def cmd_run(config_path: Path, *, once: bool, cycles: int) -> int:
     if config is None:
         _print({"ok": False, "problems": problems, "state": "stopped", "real_store_connected": False})
         return 2
+    if config.mode == "login_prep":
+        _print(
+            {
+                "ok": False,
+                "problems": ["use_login_prep_command"],
+                "state": "stopped",
+                "production_running": False,
+                "merchant_collection_enabled": False,
+                "real_store_connected": False,
+            }
+        )
+        return 2
     runner = _mapping_and_runner(config)
     try:
         if once:

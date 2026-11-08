@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
+import sys
 import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -13,6 +15,7 @@ from tempfile import TemporaryDirectory
 
 from unittest import mock
 
+from inbox_collector.browser_session import process_exists
 from inbox_collector.cli import main
 from inbox_collector.config import load_config
 from inbox_collector.login_prep import run_login_prep
@@ -72,14 +75,21 @@ class BrowserE2ETest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls._xvfb: subprocess.Popen[bytes] | None = None
-        if not os.environ.get("DISPLAY"):
+        # macOS has no Xvfb and does not use DISPLAY. Only Linux needs a
+        # virtual screen, and a missing Xvfb there is a real setup failure.
+        if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+            xvfb = shutil.which("Xvfb")
+            if xvfb is None:
+                raise RuntimeError("Linux browser tests need Xvfb when DISPLAY is unset")
             cls._xvfb = subprocess.Popen(
-                ["Xvfb", ":99", "-screen", "0", "1280x800x24"],
+                [xvfb, ":99", "-screen", "0", "1280x800x24"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            os.environ["DISPLAY"] = ":99"
             time.sleep(0.4)
+            if cls._xvfb.poll() is not None:
+                raise RuntimeError("Xvfb exited before the browser tests started")
+            os.environ["DISPLAY"] = ":99"
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -210,13 +220,16 @@ class BrowserE2ETest(unittest.TestCase):
         self.assertFalse(report["sent_to_buyer"])
         self.assertEqual(report["drafts_ready_for_review"], 1)
         self.assertEqual(runner.store.count_inbounds(), 1)
-        pid = int(runner.store.get_meta("browser_pid") or "0")
+        pid = runner.source.browser.pid
+        self.assertIsInstance(pid, int)
         self.assertGreater(pid, 0)
-        command = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\x00", b" ").decode(errors="replace")
+        self.assertEqual(runner.store.get_meta("browser_pid"), str(pid))
+        command = runner.source.browser.command
         self.assertNotIn("remote-" + "debugging-" + "port", command)
         self.assertNotIn("--headless", command)
         self.assertIn(str(self.data / "own-browser-profile"), command)
         self.assertNotIn("pinduoduo", command)
+        self.assertTrue(process_exists(pid))
         page = runner.source.browser.page
         self.assertTrue(page.url.startswith(f"http://127.0.0.1:{self.port}/"))
         ARTIFACTS.mkdir(parents=True, exist_ok=True)
@@ -226,7 +239,10 @@ class BrowserE2ETest(unittest.TestCase):
         self.assertTrue(spool["synthetic"])
         self.assertFalse(spool["sent_to_buyer"])
         runner.close()
-        self.assertFalse(Path(f"/proc/{pid}").exists())
+        deadline = time.monotonic() + 3
+        while process_exists(pid) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        self.assertFalse(process_exists(pid))
         reopened = self._runner()
         again = reopened.run_once()
         self.assertEqual(again["drafts_ready_for_review"], 1)

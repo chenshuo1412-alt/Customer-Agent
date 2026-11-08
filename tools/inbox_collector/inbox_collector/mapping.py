@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 REQUIRED_SELECTOR_KEYS = (
     "conversation_key",
@@ -129,31 +129,71 @@ _LOGIN_PREP_MERCHANT_PAGES = frozenset(
 )
 
 
-def login_prep_entry_problems(url: str) -> list[str]:
-    """URLs a manual login window may open. Collection uses a stricter check.
+_CHAT_MERCHANT_PATH = "/chat-merchant/index.html"
 
-    Local fixtures are allowed so the launch path can be tested without the
-    merchant site. The only remote pages are the public login and chat entry,
-    with no query string. API and send paths are refused.
-    """
-    if not url or not url.strip():
-        return ["entry_url_missing"]
-    local = local_entry_problems(url)
-    if not local:
-        return []
-    parts = urlsplit(url.strip())
-    host = (parts.hostname or "").lower().rstrip(".")
-    path = parts.path or "/"
-    if (
+
+def _merchant_host(host: str) -> str:
+    return host.lower().rstrip(".")
+
+
+def _chat_merchant_target(url: str) -> bool:
+    """The chat page itself, or a relative path to that page. No extra query."""
+    text = unquote(url).strip()
+    if not text or "\\" in text or text.startswith(("//", "javascript:", "data:", "file:")):
+        return False
+    if any(char in text for char in ("\r", "\n", "\t", " ")):
+        return False
+    parts = urlsplit(text)
+    if text.startswith("/"):
+        if parts.scheme or parts.netloc or parts.query or parts.username:
+            return False
+        fragment = parts.fragment
+        return parts.path == _CHAT_MERCHANT_PATH and fragment in {"", "/"}
+    return (
         parts.scheme == "https"
+        and _merchant_host(parts.hostname or "") == "mms.pinduoduo.com"
+        and parts.path == _CHAT_MERCHANT_PATH
         and not parts.query
         and not parts.username
         and not parts.password
         and parts.fragment in {"", "/"}
-        and (host, path) in _LOGIN_PREP_MERCHANT_PAGES
-    ):
+    )
+
+
+def login_prep_entry_problems(url: str) -> list[str]:
+    """URLs a manual login window may stay on. Collection uses a stricter check.
+
+    Local fixtures are allowed so tests never open the merchant site. The only
+    remote pages are the chat entry and the official login page. That login
+    page may carry one ``redirectUrl`` whose target is the chat entry.
+    """
+    if not url or not url.strip():
+        return ["entry_url_missing"]
+    if not local_entry_problems(url):
         return []
-    return ["login_prep_entry_refused"]
+    parts = urlsplit(url.strip())
+    host = _merchant_host(parts.hostname or "")
+    path = parts.path or "/"
+    if (
+        parts.scheme != "https"
+        or host != "mms.pinduoduo.com"
+        or parts.username
+        or parts.password
+        or parts.fragment not in {"", "/"}
+        or (host, path) not in _LOGIN_PREP_MERCHANT_PAGES
+    ):
+        return ["login_prep_entry_refused"]
+    if not parts.query:
+        return []
+    if path not in {"/login", "/login/"}:
+        return ["login_prep_entry_refused"]
+    try:
+        pairs = parse_qsl(parts.query, keep_blank_values=True, strict_parsing=True)
+    except ValueError:
+        return ["login_prep_entry_refused"]
+    if len(pairs) != 1 or pairs[0][0] != "redirectUrl" or not _chat_merchant_target(pairs[0][1]):
+        return ["login_prep_entry_refused"]
+    return []
 
 
 def entry_allowed_by_mapping(url: str, mapping: dict[str, Any] | None) -> list[str]:

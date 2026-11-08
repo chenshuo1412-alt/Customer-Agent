@@ -627,8 +627,40 @@ class CollectorTest(unittest.TestCase):
 
     def test_login_prep_allowlist_is_not_collection(self) -> None:
         chat = "https://mms.pinduoduo.com/chat-merchant/index.html#/"
+        from urllib.parse import quote
+
         self.assertEqual(login_prep_entry_problems(chat), [])
         self.assertEqual(login_prep_entry_problems("https://mms.pinduoduo.com/login"), [])
+        official = "https://mms.pinduoduo.com/login/?redirectUrl=" + quote(chat, safe="")
+        relative = "https://mms.pinduoduo.com/login/?redirectUrl=" + quote(
+            "/chat-merchant/index.html#/", safe=""
+        )
+        self.assertEqual(login_prep_entry_problems(official), [])
+        self.assertEqual(login_prep_entry_problems(relative), [])
+        self.assertEqual(
+            login_prep_entry_problems(
+                "https://mms.pinduoduo.com/login/?redirectUrl="
+                + quote("https://evil.example/phish", safe="")
+            ),
+            ["login_prep_entry_refused"],
+        )
+        self.assertEqual(
+            login_prep_entry_problems(
+                "https://mms.pinduoduo.com/login/?redirectUrl="
+                + quote("https://mms.pinduoduo.com/plateau/chat/send_message", safe="")
+            ),
+            ["login_prep_entry_refused"],
+        )
+        self.assertEqual(
+            login_prep_entry_problems(
+                "https://mms.pinduoduo.com/login/?redirectUrl=/chat-merchant/index.html&next=https://evil.example"
+            ),
+            ["login_prep_entry_refused"],
+        )
+        self.assertEqual(
+            login_prep_entry_problems("https://mms.pinduoduo.com.evil.example/login/"),
+            ["login_prep_entry_refused"],
+        )
         self.assertEqual(
             login_prep_entry_problems("https://mms.pinduoduo.com/plateau/chat/send_message"),
             ["login_prep_entry_refused"],
@@ -647,7 +679,9 @@ class CollectorTest(unittest.TestCase):
             side_effect=AssertionError("browser opened"),
         ):
             self.assertEqual(main(["check-config", "--config", str(path)]), 0)
+            self.assertFalse(self.data.exists())
             self.assertEqual(main(["run", "--config", str(path), "--once"]), 2)
+            self.assertFalse(self.data.exists())
             self.assertEqual(
                 main(["check-config", "--config", str(ROOT / "config.login-prep.example.json")]),
                 0,
@@ -685,8 +719,15 @@ class CollectorTest(unittest.TestCase):
 
     def test_cli_demo_and_shipped_mapping(self) -> None:
         self.assertEqual(main(["validate-mapping", "--mapping", str(MAPPING)]), 2)
-        self.assertEqual(main(["check-config", "--config", str(ROOT / "config.fixture.example.json")]), 0)
-        self.assertFalse((ROOT / "data").exists())
+        isolated = self.root / "isolated-config.json"
+        example = json.loads((ROOT / "config.fixture.example.json").read_text(encoding="utf-8"))
+        isolated_data = self.root / "check-data"
+        example["data_dir"] = str(isolated_data)
+        example["mapping_path"] = str(ROOT / example["mapping_path"])
+        example["fixture_path"] = str(ROOT / example["fixture_path"])
+        isolated.write_text(json.dumps(example), encoding="utf-8")
+        self.assertEqual(main(["check-config", "--config", str(isolated)]), 0)
+        self.assertFalse(isolated_data.exists())
         demo = self.root / "demo"
         self.assertEqual(main(["demo", "--data-dir", str(demo)]), 0)
         spool = json.loads(next((demo / "spool").glob("*.json")).read_text(encoding="utf-8"))
@@ -726,6 +767,8 @@ class SafetyScanTest(unittest.TestCase):
         for path in PACKAGE.rglob("*.py"):
             text = path.read_text(encoding="utf-8")
             for item in forbidden:
+                if item == "subprocess" and path.name == "browser_session.py":
+                    continue
                 if item in text:
                     offenders.append(f"{path.name}:{item}")
             tree = ast.parse(text)
@@ -739,6 +782,9 @@ class SafetyScanTest(unittest.TestCase):
                     if any(name.startswith(("playwright", "PyQt6", "Channel", "bridge")) for name in names):
                         if not (path.name == "browser_session.py" and any(name.startswith("playwright") for name in names)):
                             offenders.append(f"{path.name}:import:{names}")
+        session = (PACKAGE / "browser_session.py").read_text(encoding="utf-8")
+        self.assertNotIn("shell=True", session)
+        self.assertNotIn("taskkill", session)
         self.assertEqual(offenders, [])
         provider = (PACKAGE / "providers.py").read_text(encoding="utf-8")
         self.assertLess(provider.index(WEBHOOK_NETWORK_ENV), provider.index("urlopen"))

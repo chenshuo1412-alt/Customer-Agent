@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -39,22 +40,60 @@ def _owned_profile(path: Path) -> None:
     os.chmod(marker, 0o600)
 
 
+def _remember_match(found: tuple[int, str] | None, pid: int, command: str) -> tuple[int, str]:
+    if found is None or len(command) > len(found[1]):
+        return pid, command
+    return found
+
+
 def _process_matches(profile: Path) -> tuple[int | None, str]:
+    """Find the browser this profile launched. Empty pid is not success."""
     needle = str(profile)
     found: tuple[int, str] | None = None
-    for entry in Path("/proc").iterdir():
-        if not entry.name.isdigit():
+    proc = Path("/proc")
+    if proc.is_dir():
+        for entry in proc.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                raw = (entry / "cmdline").read_bytes()
+            except OSError:
+                continue
+            command = raw.replace(b"\x00", b" ").decode(errors="replace")
+            if needle in command and "chrom" in command.lower():
+                found = _remember_match(found, int(entry.name), command)
+        if found is not None:
+            return found
+    completed = subprocess.run(
+        ["ps", "-ax", "-o", "pid=", "-o", "command="],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    for line in completed.stdout.splitlines():
+        stripped = line.strip()
+        if needle not in stripped or "chrom" not in stripped.lower():
             continue
-        try:
-            raw = (entry / "cmdline").read_bytes()
-        except OSError:
-            continue
-        command = raw.replace(b"\x00", b" ").decode(errors="replace")
-        if needle in command and "chrom" in command.lower() and (found is None or len(command) > len(found[1])):
-            found = (int(entry.name), command)
+        pid_text, _, command = stripped.partition(" ")
+        if pid_text.isdigit():
+            found = _remember_match(found, int(pid_text), command)
     if found is None:
         return None, ""
     return found
+
+
+def process_exists(pid: int | None) -> bool:
+    """True only for a positive pid that the OS still has."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    proc = Path("/proc")
+    if proc.is_dir():
+        return (proc / str(pid)).exists()
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
 
 
 def resolve_browser_executable(configured: str) -> str | None:
@@ -86,6 +125,7 @@ class DedicatedBrowser:
         self.launched = False
         self.headless = False
         self.pid: int | None = None
+        self.command = ""
         self.page = None
         self._playwright = None
         self._context = None
@@ -127,16 +167,16 @@ class DedicatedBrowser:
         self._playwright = playwright
         self._context = context
         self.page = context.pages[0] if context.pages else context.new_page()
-        if Path("/proc").is_dir():
-            pid, command = _process_matches(self.profile_dir)
-            debug_flag = "remote-" + "debugging-" + "port"
-            if debug_flag in command or "--headless" in command:
-                self.close()
-                raise BrowserLaunchRefused("refusing_debug_port")
-            if pid is None:
-                self.close()
-                raise BrowserLaunchRefused("browser_process_not_found")
-            self.pid = pid
+        pid, command = _process_matches(self.profile_dir)
+        debug_flag = "remote-" + "debugging-" + "port"
+        if debug_flag in command or "--headless" in command:
+            self.close()
+            raise BrowserLaunchRefused("refusing_debug_port")
+        if pid is None:
+            self.close()
+            raise BrowserLaunchRefused("browser_process_not_found")
+        self.pid = pid
+        self.command = command
         self.launched = True
         self.headless = False
 
