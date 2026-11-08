@@ -102,6 +102,57 @@ class GeometryProtocolTest(unittest.TestCase):
                 "<li class='onemsg' id='msg-10000008' currentuid='uid-msg-10000001' style='width:300px;height:28px'>"
                 "<div class='msg-content-box' style='width:100px;height:20px'>标识不一致</div><span>商家</span></li>"
             ),
+            "div-active": _page(
+                "<ul><li class='chat-item'>张三的会话</li></ul>"
+                "<div class='chatWindowHeader' style='width:200px;height:16px'></div>"
+                "<div class='session'><div class='row-mark active' style='width:80px;height:20px'></div></div>"
+                "<li class='onemsg' style='width:400px;height:36px'>"
+                "<div class='msg-content-box' style='width:100px;height:20px'>高亮在后代</div></li>"
+            ),
+            "nested-bubble": _page(
+                "<li class='onemsg' style='position:relative;width:500px;height:80px'>"
+                "<div class='wrap' style='width:500px;height:80px'>"
+                "<div class='bubble-body' style='width:104px;height:24px'>嵌套气泡</div></div></li>"
+            ),
+            "role-outside": (
+                "<!DOCTYPE html><html><body style='margin:0'>"
+                "<div class='a1'><div class='a2'><div class='a3'><div class='a4'><div class='a5'><div class='a6'>"
+                "<div class='thread'><span>商家</span>"
+                "<div class='content-box' style='width:640px;height:120px'>"
+                "<li class='onemsg' style='width:400px;height:40px'>"
+                "<div class='msg-content-box' style='width:120px;height:20px'>行外角色</div>"
+                "</li></div></div></div></div></div></div></div></div></body></html>"
+            ),
+            "uid-on-panel": (
+                "<!DOCTYPE html><html><body style='margin:0'>"
+                "<div class='content-box' currentuid='uid-panel-10000077' style='width:640px;height:160px'>"
+                "<li class='onemsg' id='msg-panel-10000077' style='width:400px;height:36px'>"
+                "<div class='msg-content-box' style='width:120px;height:20px'>面板标识</div></li></div>"
+                "<div class='session active' style='width:80px;height:20px'></div></body></html>"
+            ),
+            "uid-missing": _page(
+                "<div class='lane active' id='sel-token-10000002' style='width:80px;height:20px'></div>"
+                "<li class='onemsg' id='msg-token-10000001' style='width:300px;height:28px'>"
+                "<div class='msg-content-box' style='width:100px;height:20px'>没有共同标识</div></li>"
+            ),
+            "system-row": _page(
+                "<li class='onemsg' style='width:400px;height:40px'>"
+                "<div class='msg-content-box' style='width:100px;height:20px'>系统行前</div></li>"
+                "<div class='system-tip' style='width:400px;height:18px'>系统提示</div>"
+            ),
+            "duplicate-active": _page(
+                "<div class='lane active' style='width:40px;height:16px'></div>"
+                "<div class='lane active' style='width:40px;height:16px'></div>"
+                "<li class='onemsg' style='width:300px;height:28px'>"
+                "<div class='msg-content-box' style='width:80px;height:20px'>重复高亮</div></li>"
+            ),
+            "too-many-active": _page(
+                "".join(
+                    f"<div class='lane active' style='width:20px;height:12px'></div>" for _ in range(9)
+                )
+                + "<li class='onemsg' style='width:300px;height:28px'>"
+                "<div class='msg-content-box' style='width:80px;height:20px'>高亮过多</div></li>"
+            ),
         }
         phrases = {
             "ready": _PHRASE,
@@ -109,6 +160,14 @@ class GeometryProtocolTest(unittest.TestCase):
             "zero": "零矩形短句",
             "duplicate": "重复短句",
             "mismatch": "标识不一致",
+            "div-active": "高亮在后代",
+            "nested-bubble": "嵌套气泡",
+            "role-outside": "行外角色",
+            "uid-on-panel": "面板标识",
+            "uid-missing": "没有共同标识",
+            "system-row": "系统行前",
+            "duplicate-active": "重复高亮",
+            "too-many-active": "高亮过多",
         }
         with TemporaryDirectory() as tmp:
             data = Path(tmp)
@@ -132,9 +191,17 @@ class GeometryProtocolTest(unittest.TestCase):
                     self.assertNotIn("uid-conv-10000001", json.dumps(report, ensure_ascii=False))
                     widths.append(float(report["matched"]["bubble"]["width"]))
                 ready = report
-                self.assertEqual(ready["status"], "geometry_ready")
+                self.assertEqual(ready["status"], "structure_ready")
                 self.assertEqual(ready["matched"]["role_label"], "商家")
-                self.assertEqual(ready["matched"]["role_source"], "visible_allowlist_label")
+                self.assertEqual(ready["matched"]["role_source"], "row_allowlist_label")
+                self.assertEqual(ready["matched"]["id_location"], "on_row")
+                self.assertEqual(ready["structure"]["limits"], {"depth": 4, "nodes": 48, "candidates": 8})
+                self.assertFalse(ready["structure"]["truncated"])
+                self.assertFalse(ready["session_pairing"]["durable"])
+                self.assertEqual(len(ready["session_pairing"]["ephemeral_structure_sha256"]), 64)
+                self.assertFalse(ready["shared_identifier_refused"])
+                self.assertFalse(ready["selectors_inferred"])
+                self.assertIn("literal_role_label_required", ready["assumptions_not_evidence"])
                 self.assertEqual(ready["matched"]["bubble_horizontal"], "right")
                 self.assertEqual(ready["matched"]["avatar_side"], "left_of_bubble")
                 self.assertEqual(ready["following"]["role_label"], "买家")
@@ -157,9 +224,11 @@ class GeometryProtocolTest(unittest.TestCase):
                     return json.loads((data / "dom-diagnose.result.json").read_text(encoding="utf-8"))
 
                 missing_role = run("no-role")
-                self.assertEqual(missing_role["status"], "role_unproven")
-                self.assertEqual(missing_role["matched"]["role_label"], "unproven")
-                self.assertEqual(missing_role["matched"]["role_source"], "no_allowlist_label")
+                self.assertEqual(missing_role["status"], "structure_ready")
+                self.assertEqual(missing_role["matched"]["role_label"], "unknown")
+                self.assertEqual(missing_role["matched"]["role_source"], "no_visible_role_evidence")
+                self.assertIn("buyer-item", missing_role["matched"]["bubble_classes"])
+                self.assertNotEqual(missing_role["matched"]["role_label"], "买家")
                 self.assertIsNotNone(missing_role["matched"]["bubble"])
                 zero = run("zero")
                 self.assertEqual(zero["status"], "zero_rectangle")
@@ -195,6 +264,72 @@ class GeometryProtocolTest(unittest.TestCase):
                 self.assertIn("uid-msg-10000001", stored)
                 public = (data / "dom-diagnose.result.json").read_text(encoding="utf-8")
                 self.assertNotIn("uid-msg-10000001", public)
+
+                active = run("div-active")
+                self.assertEqual(active["status"], "structure_ready")
+                self.assertEqual(active["selected_count"], 1)
+                self.assertEqual(active["structure"]["highlighted"][0]["tag"], "div")
+                self.assertIn("active", active["structure"]["highlighted"][0]["classes"])
+                self.assertIn("chatWindowHeader", active["structure"]["header"]["classes"])
+                self.assertNotIn("张三", json.dumps(active, ensure_ascii=False))
+                self.assertTrue(active["shared_identifier_refused"])
+
+                nested = run("nested-bubble")
+                self.assertEqual(nested["status"], "structure_ready")
+                self.assertEqual(nested["matched"]["bubble_found"], "nested_smaller")
+                self.assertIn("bubble-body", nested["matched"]["bubble_classes"])
+                self.assertEqual(nested["matched"]["role_label"], "unknown")
+                self.assertAlmostEqual(nested["matched"]["bubble"]["width"], 104.0, delta=2)
+
+                outside = run("role-outside")
+                self.assertEqual(outside["matched"]["role_label"], "商家")
+                self.assertEqual(outside["matched"]["role_source"], "ancestor_allowlist_label")
+                self.assertEqual(len(outside["structure"]["matched_ancestors"]), 4)
+                ancestor_classes = [token for item in outside["structure"]["matched_ancestors"] for token in item["classes"]]
+                self.assertIn("a6", ancestor_classes)
+                self.assertNotIn("a1", ancestor_classes)
+
+                panel = run("uid-on-panel")
+                self.assertEqual(panel["matched"]["currentuid_location"], "on_ancestor")
+                self.assertEqual(panel["matched"]["currentuid"]["format"], "token")
+                self.assertIsNotNone(panel["matched"]["currentuid"]["sha256"])
+                self.assertEqual(panel["selected"]["currentuid"]["format"], "empty")
+                self.assertEqual(panel["conversation_link"], "not_comparable")
+                self.assertTrue(panel["shared_identifier_refused"])
+                self.assertNotIn("uid-panel-10000077", json.dumps(panel, ensure_ascii=False))
+                self.assertFalse(panel["session_pairing"]["durable"])
+
+                missing_uid = run("uid-missing")
+                self.assertEqual(missing_uid["status"], "structure_ready")
+                self.assertEqual(missing_uid["matched"]["currentuid_location"], "absent")
+                self.assertEqual(missing_uid["conversation_link"], "not_comparable")
+                self.assertEqual(missing_uid["identifier_observation"], "id_hash_differ")
+                self.assertTrue(missing_uid["shared_identifier_refused"])
+                self.assertNotIn("msg-token-10000001", json.dumps(missing_uid, ensure_ascii=False))
+
+                system = run("system-row")
+                self.assertEqual(system["status"], "structure_ready")
+                self.assertTrue(system["following_present"])
+                self.assertEqual(system["following"]["bubble_found"], "absent")
+                self.assertIsNone(system["following"]["bubble"])
+                self.assertEqual(system["structure"]["following_tag"], "div")
+                self.assertIn("system-tip", system["structure"]["following_classes"])
+                self.assertNotIn("系统提示", json.dumps(system, ensure_ascii=False))
+
+                ambiguous = run("duplicate-active")
+                self.assertEqual(ambiguous["status"], "selection_ambiguous")
+                self.assertEqual(ambiguous["conversation_link"], "selection_ambiguous")
+                self.assertEqual(len(ambiguous["structure"]["highlighted"]), 2)
+                self.assertFalse(ambiguous["production_send_allowed"])
+                self.assertTrue(ambiguous["shared_identifier_refused"])
+
+                capped = run("too-many-active")
+                self.assertEqual(capped["status"], "selection_truncated")
+                self.assertEqual(capped["error"], "candidate_cap")
+                self.assertTrue(capped["structure"]["truncated"])
+                self.assertEqual(capped["structure"]["truncation_reason"], "candidate_cap")
+                self.assertLessEqual(len(capped["structure"]["highlighted"]), 4)
+                self.assertGreater(capped["highlighted_observed"], 8)
                 browser.close()
 
 

@@ -199,7 +199,7 @@ def cmd_diagnose_dom(
         payload = _diagnose_summary(payload)
     _print(payload)
     if op == "geometry-readonly":
-        return 0 if payload.get("status") == "geometry_ready" else 2
+        return 0 if payload.get("status") in {"geometry_ready", "structure_ready"} else 2
     return 0 if payload.get("status") not in {None, "diagnostic_error"} else 2
 
 

@@ -62,7 +62,11 @@ Profile 里会留下登录态，只放在本机，不要复制、同步或提交
 python -m inbox_collector diagnose-dom --data-dir data --timeout-seconds 5 --op geometry-readonly --probe-phrase '客服测试2006'
 ```
 
-退出码 0 仅当 `status` 是 `geometry_ready`。其它明确状态退出码 2，字段仍然都在。`handler` 必须是 `geometry-readonly`。`samples` 为 8。`role_label` 只来自可见的买家、商家、客服原文标签，否则是 `unproven`。`buyer-item` 和左右位置都不是方向。`id.format` 为 `short_index_not_uid` 的短数字不能当会话标识。`conversation_link` 为 `uid_mismatch` 表示消息和当前选中行的 currentuid 哈希不一致。
+退出码 0 仅当 `status` 是 `structure_ready`（或旧的 `geometry_ready`）。短语不存在、不唯一、零矩形、几何不稳、选中项多于一个、高亮候选超过 8 个、或两边 currentuid 哈希不一致，退出码都是 2，字段仍然都在。`handler` 必须是 `geometry-readonly`。`samples` 为 8。
+
+`structure` 只描述这句所在行、紧邻的下一行、消息面板和标题，以及当前可见的高亮节点。每处只有标签、安全 class、矩形和最多 4 层祖先。深度 4，高亮候选最多 8 个，写出的高亮节点最多 4 个。超出时 `truncated` 为 true，并写 `candidate_cap` 或 `node_cap`。没有看到角色原文时 `role_label` 是 `unknown`，不会从 `buyer-item`、左右位置或 class 名推断。角色原文如果在行外的父容器上，`role_source` 是 `ancestor_allowlist_label`。`id` / `currentuid` 会在该行、子孙和祖先上找，只报告 `format`、`sha256` 和位置（`on_row`、`on_descendant`、`on_ancestor`、`absent`）。短数字仍是 `short_index_not_uid`，哈希为空。
+
+`conversation_link` 只有两边 currentuid 哈希都在且相等时才是 `hash_match`。没有共同标识是 `not_comparable`，`shared_identifier_refused` 为 true。多个高亮是 `selection_ambiguous`。这不是平台做不到，只是这次没拿到能绑定的证据。`session_pairing.durable` 恒为 false：`ephemeral_structure_sha256` 只给这次渲染里的人工对照，页面一变或进程重启就失效，不能当作平台 UID，也不能跨重启认同一会话。`selectors_inferred` 和 `production_send_allowed` 都是 false。未知 `op` 或多余字段仍直接拒绝。
 
 正在运行的旧 login-prep 不会执行短句核验或测试发送。换成这一版之后，重复诊断和一次测试发送只写请求文件。
 
