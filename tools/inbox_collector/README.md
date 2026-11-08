@@ -76,6 +76,16 @@ python -m inbox_collector diagnose-dom --data-dir data --timeout-seconds 5 --sum
 
 `phrase_probe.unique` 为 true 表示这句在当前可见消息区恰好一条。`following_row` 是它后面那一条可见行的 tag、安全 class 和结构角色，不带原文。`later_visible_rows` 不是 0 时仍然拒绝发送。`composer_report` 是这次要看的完整结构：从可见输入框向上，停在还没包住 `li.onemsg` 的那一层，并带上同层、不含消息行的相邻容器，再向下最多 6 层、80 个节点。节点只有 tag、安全 class、role、可见性、层级和标签形状。`allowlist_candidates` 只统计这个 composer 里面、可见、可点击、且文字精确是「发送」或「发送 + Enter」的节点。composer 外面的按钮在 `outside_buttons`，`inside_composer` 为 false，不能当成发送控件。`truncated` 为 true 表示这次采样不够，也不能当成已经找全。`label_kind` 为 `other_redacted` 是已经读过渲染文字但没有命中；不要把这种按钮升级成发送。结果不包含这句原文、姓名、id 或时间。
 
+已批准的固定原文只走下面这条命令，不走 `test-send`，也不调用本机模型。授权只绑定这一次挑战、这一句原文、过期时间和当前 `login-prep` 窗口。页面上没有字面角色标签、或同时有两个 active，都不拿来当身份，也不因此拒绝。`currentuid` 不读取、不发送。输入框里已有草稿就拒绝，不覆盖。发送前再核对同一面板；面板或消息 id 变了就作废。ledger 一旦进入输入就封存，不确定或失败后不再自动重发。看见新的原文气泡只表示页面上出现了，不表示买家端已送达。
+
+正在跑的旧 `login-prep` 不会执行这条命令。正常退出后重新打开才会发布本窗口标记；专用 profile 仍复用，不要热注入。
+
+```bash
+python -m inbox_collector confirmed-text-send --data-dir data --challenge '客服配对1109-A7' --reply '测试收到，客服回复链路验证中。' --buyer-source own-account --expires-seconds 600 --opt-in single-confirmed-text --timeout-seconds 60
+```
+
+退出码 0 仅当 `status` 是 `page_visible`，并且 `delivery_claimed` 和 `production_send_allowed` 都是 false。其它状态退出码 2。
+
 只对这一句发送一次，不是全店托管：
 
 ```bash

@@ -1686,7 +1686,13 @@ def export_rendered_dom(page: Any, *, timeout_seconds: float = 2.0, probe_phrase
     return report
 
 
-def service_diagnose_request(page: Any, data_dir: Path, *, timeout_seconds: float = 2.0) -> None:
+def service_diagnose_request(
+    page: Any,
+    data_dir: Path,
+    *,
+    timeout_seconds: float = 2.0,
+    window_id: str | None = None,
+) -> None:
     """If the owning process sees a request file, write one report and keep the page."""
     request = data_dir / "dom-diagnose.request"
     if not request.is_file():
@@ -1709,6 +1715,10 @@ def service_diagnose_request(page: Any, data_dir: Path, *, timeout_seconds: floa
         from inbox_collector.test_send import run_owned_test_send
 
         result = run_owned_test_send(page, data_dir, phrase)
+    elif isinstance(payload, dict) and payload.get("op") == "confirmed-text":
+        from inbox_collector.confirmed_text import run_confirmed_text
+
+        result = run_confirmed_text(page, data_dir, phrase, window_id=window_id)
     elif isinstance(payload, dict) and payload.get("op") == "geometry-readonly":
         result = run_geometry(
             page,

@@ -422,6 +422,15 @@ def build_parser() -> argparse.ArgumentParser:
     test_send.add_argument("--opt-in", required=True)
     test_send.add_argument("--timeout-seconds", type=float, default=60)
 
+    confirmed = sub.add_parser("confirmed-text-send")
+    confirmed.add_argument("--data-dir", type=Path, required=True)
+    confirmed.add_argument("--challenge", required=True)
+    confirmed.add_argument("--reply", required=True)
+    confirmed.add_argument("--buyer-source", required=True)
+    confirmed.add_argument("--expires-seconds", type=int, required=True)
+    confirmed.add_argument("--opt-in", required=True)
+    confirmed.add_argument("--timeout-seconds", type=float, default=60)
+
     routine_setup = sub.add_parser("routine-setup")
     routine_setup.add_argument("--url", required=True)
     routine_setup.add_argument("--config", type=Path, required=True)
@@ -492,6 +501,55 @@ def main(argv: Sequence[str] | None = None) -> int:
             report = {"status": "phrase_leaked", "production_send_allowed": False, "storewide_auto_reply": False}
         _print(report)
         return 0 if report.get("status") == "test_sent" and report.get("production_send_allowed") is False else 2
+    if args.command == "confirmed-text-send":
+        from inbox_collector.confirmed_text import (
+            _ledger_state,
+            read_window_id,
+            reply_problem,
+            write_authorization,
+        )
+        from inbox_collector.dom_diagnose import wait_for_diagnose_result
+
+        refused = {
+            "production_send_allowed": False,
+            "storewide_auto_reply": False,
+            "delivery_claimed": False,
+            "retry_allowed": False,
+        }
+        if args.opt_in != "single-confirmed-text" or args.buyer_source != "own-account":
+            _print({"status": "authorization_refused", **refused})
+            return 2
+        if reply_problem(args.reply) or not args.challenge.strip():
+            _print({"status": "reply_rejected", **refused})
+            return 2
+        if not 30 <= args.expires_seconds <= 900 or args.timeout_seconds <= 0:
+            _print({"status": "authorization_expired", **refused})
+            return 2
+        if _ledger_state(args.data_dir) is not None:
+            _print({"status": "ledger_closed", "ledger_sealed": True, **refused})
+            return 2
+        window_id = read_window_id(args.data_dir)
+        if window_id is None:
+            _print({"status": "window_unbound", **refused})
+            return 2
+        write_authorization(
+            args.data_dir,
+            challenge=args.challenge,
+            reply=args.reply,
+            window_id=window_id,
+            expires_at=time.time() + args.expires_seconds,
+        )
+        report = wait_for_diagnose_result(
+            args.data_dir,
+            timeout_seconds=args.timeout_seconds,
+            probe_phrase=args.challenge,
+            op="confirmed-text",
+        )
+        blob = json.dumps(report, ensure_ascii=False)
+        if args.challenge in blob or args.reply in blob:
+            report = {"status": "phrase_leaked", **refused}
+        _print(report)
+        return 0 if report.get("status") == "page_visible" and report.get("delivery_claimed") is False and report.get("production_send_allowed") is False else 2
     if args.command == "auto-reply-sim":
         from inbox_collector.auto_reply import run_local_ollama_sim
 
