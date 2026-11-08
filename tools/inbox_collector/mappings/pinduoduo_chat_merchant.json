@@ -11,6 +11,7 @@
     "「待办任务 0」不是未读数，不能用来触发。",
     "同一分钟、同一段预览可能对应多条消息。没有稳定 message id 时必须停止，不能靠预览去重。",
     "本文件不是可用选择器。validated 为 false 时实店模式必须停止并告警。",
-    "禁止把 fixtures 里 generic-inbox 的 data-* 属性套到真实商家页面。"
+    "禁止把 fixtures 里 generic-inbox 的 data-* 属性套到真实商家页面。",
+    "2026-11-08 diagnose-dom 看到 class 名 chat-list-box、chatWindowHeader，以及属性名 id、title、href、aria-label、msgtimeformate、threeminutesthreshold、data-clipboard-text。这些只是结构证据，不是选择器，也不能当成稳定消息 id、时间或已回复状态。缺少 data-message-id 不表示真实页面不可识别。"
   ]
 }

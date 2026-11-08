@@ -86,6 +86,83 @@ class DomDiagnoseTest(unittest.TestCase):
         self.assertIsNotNone(report["nodes"])
         self.assertFalse(report["platform_unsupported"])
 
+    def test_merchant_shell_is_not_fields_absent_and_does_not_invent_identity(self) -> None:
+        page = FakePage(
+            {
+                "nodes": [
+                    {
+                        "tag": "div",
+                        "attributes": [
+                            "class",
+                            "id",
+                            "title",
+                            "href",
+                            "aria-label",
+                            "msgtimeformate",
+                            "threeminutesthreshold",
+                            "data-clipboard-text",
+                            "data-v-abc",
+                            "tabindex",
+                        ],
+                        "class_structure": ["chat-list-box"],
+                        "path": ["chat-list-box"],
+                        "conversation_selected": None,
+                        "depth": 2,
+                        "child_element_count": 3,
+                    },
+                    {
+                        "tag": "div",
+                        "attributes": ["class", "id", "msgtimeformate"],
+                        "class_structure": ["chat-item"],
+                        "path": ["chat-list-box", "chat-item"],
+                        "conversation_selected": None,
+                        "depth": 3,
+                        "child_element_count": 0,
+                    },
+                    {
+                        "tag": "div",
+                        "attributes": ["class", "id", "msgtimeformate"],
+                        "class_structure": ["chat-item"],
+                        "path": ["chat-list-box", "chat-item"],
+                        "conversation_selected": None,
+                        "depth": 3,
+                        "child_element_count": 0,
+                    },
+                    {
+                        "tag": "div",
+                        "attributes": ["class"],
+                        "class_structure": ["chatWindowHeader"],
+                        "path": ["chatWindowHeader"],
+                        "conversation_selected": None,
+                        "depth": 2,
+                        "child_element_count": 0,
+                    },
+                ]
+            }
+        )
+        report = export_rendered_dom(page)
+        rendered = json.dumps(report, ensure_ascii=False)
+        self.assertEqual(report["status"], "identity_unproven")
+        self.assertNotEqual(report["reason"], "semantic_attributes_missing")
+        self.assertEqual(report["identity"]["stable_message_id"], "unproven")
+        self.assertEqual(report["identity"]["message_time"], "unproven")
+        self.assertEqual(report["identity"]["reply_status"], "unproven")
+        self.assertEqual(report["identity"]["direction"], "unproven")
+        self.assertEqual(report["identity"]["id_attribute_name"], "present_value_unread")
+        self.assertEqual(report["identity"]["time_attribute_name"], "present_value_unread")
+        self.assertEqual(report["identity"]["fixture_attribute_names"], "absent")
+        self.assertIn("chat-list-box", report["observed_shell_classes"])
+        self.assertFalse(report["fixture_names_required"])
+        self.assertFalse(report["production_mapping_validated"])
+        self.assertFalse(report["collection_enabled"])
+        self.assertFalse(report["selectors_inferred"])
+        self.assertEqual(report["selector_candidates"], [])
+        self.assertGreaterEqual(report["repeated_structures"][0]["count"], 2)
+        self.assertEqual(report["repeated_structures"][0]["row_identity"], "unproven")
+        self.assertNotIn("data-message-id", rendered)
+        self.assertNotIn("data-v-abc", rendered)
+        self.assertNotIn("买家", rendered)
+
     def test_semantic_names_do_not_include_values(self) -> None:
         page = FakePage(
             {
