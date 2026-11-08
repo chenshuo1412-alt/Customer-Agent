@@ -1,0 +1,16 @@
+{
+  "mapping_id": "pinduoduo.chat-merchant",
+  "validated": false,
+  "validation_status": "unverified_no_dom",
+  "list_fields_sufficient": false,
+  "entry_url": "https://mms.pinduoduo.com/chat-merchant/index.html#/",
+  "selectors": {},
+  "do_not_use_as_unread": ["待办任务", "红点", "未读角标", "预览摘要"],
+  "notes": [
+    "2026-11-08 的只读快照只看到分组文案「已回复」「已被自动回复」、分钟级时间和截断预览，以及「1个对话待复核」。没有 DOM、CSS selector、稳定会话 key 或 message id，也没有可当未读计数的字段。",
+    "「待办任务 0」不是未读数，不能用来触发。",
+    "同一分钟、同一段预览可能对应多条消息。没有稳定 message id 时必须停止，不能靠预览去重。",
+    "本文件不是可用选择器。validated 为 false 时实店模式必须停止并告警。",
+    "禁止把 fixtures 里 generic-inbox 的 data-* 属性套到真实商家页面。"
+  ]
+}

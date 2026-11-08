@@ -1,0 +1,29 @@
+{
+  "label": "模拟草稿",
+  "synthetic": true,
+  "real_store_connected": false,
+  "sent_to_buyer": false,
+  "prompt_instructions_executed": false,
+  "disclaimer": "未连接真实店铺。未向买家发送。Webhook 投递成功也不等于回复草稿已返回。",
+  "status": "ready_for_review",
+  "provider": "mock",
+  "conversation_key": "conv-sim-1",
+  "batch_key": "example-batch-not-from-a-live-run",
+  "reason": null,
+  "draft_text": "【模拟草稿】这是本地示例，不是真实客服回复，也没有发送给买家。",
+  "event_id": "example-event-not-from-a-live-run",
+  "webhook_is_draft_receipt": false,
+  "untrusted_messages": [
+    {
+      "untrusted": true,
+      "message_id": "msg-sim-new",
+      "direction": "buyer",
+      "message_time": "2026-11-08T13:32:44+08:00",
+      "time_precision": "second",
+      "list_time_text": "13:32",
+      "body": "【模拟】买家询问发货时间，非真实客户。",
+      "reply_status": "unreplied",
+      "reply_status_reliability": "reliable"
+    }
+  ]
+}

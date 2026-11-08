@@ -1,0 +1,288 @@
+"""Command line. The default commands do not loop and do not open a shop."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import time
+from pathlib import Path
+from typing import Any, Sequence
+
+from inbox_collector.browser_plan import BrowserLaunchRefused, assert_isolated_profile, browser_plan
+from inbox_collector.config import AppConfig, load_config, load_mapping_for, readiness_problems
+from inbox_collector.demo_data import BASELINE_SNAPSHOT, NEW_SNAPSHOT
+from inbox_collector.health import build_health
+from inbox_collector.mapping import mapping_problems
+from inbox_collector.models import snapshot_from_dict
+from inbox_collector.pipeline import Pipeline
+from inbox_collector.providers import MockProvider, WebhookProvider, provider_for
+from inbox_collector.runner import Runner
+from inbox_collector.sources import FixtureSource
+from inbox_collector.store import Store
+
+
+def _print(payload: dict[str, Any]) -> None:
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _mapping_and_runner(config: AppConfig, *, transport: object | None = None) -> Runner:
+    mapping, map_errors = load_mapping_for(config)
+    if config.mode != "fixture":
+        mapping = mapping
+    elif map_errors:
+        mapping = None
+    webhook = None
+    if config.draft_provider == "webhook":
+        webhook = WebhookProvider(
+            config.webhook_url,
+            config.webhook_secret_env,
+            allow_network=config.webhook_allow_network,
+            transport=transport if callable(transport) else None,
+        )
+    provider = provider_for(config.draft_provider, webhook=webhook)
+    source = None
+    problems = readiness_problems(config, mapping)
+    if config.mode == "fixture" and not problems and config.fixture_path is not None:
+        source = FixtureSource(config.fixture_path)
+    return Runner(config, mapping, source, provider)
+
+
+def cmd_check(config_path: Path) -> int:
+    config, problems = load_config(config_path)
+    if config is None:
+        _print({"ok": False, "problems": problems, "real_store_connected": False, "state": "stopped"})
+        return 2
+    mapping, _errors = load_mapping_for(config)
+    ready = readiness_problems(config, mapping)
+    if config.mode != "fixture":
+        ready.append("real_mode_refused")
+    _print(
+        {
+            "ok": not ready,
+            "problems": ready,
+            "state": "stopped",
+            "real_store_connected": False,
+            "mapping_validated": False if mapping is None else mapping.get("validated") is True
+            and not mapping_problems(mapping),
+            "sample_interval_seconds": config.sample_interval_seconds,
+            "interval_is_bot_routine": False,
+        }
+    )
+    return 0 if not ready else 2
+
+
+def cmd_validate_mapping(path: Path) -> int:
+    try:
+        from inbox_collector.mapping import load_mapping
+
+        mapping = load_mapping(path)
+    except (OSError, json.JSONDecodeError, ValueError):
+        _print({"validated": False, "problems": ["mapping_unreadable"], "real_store_connected": False})
+        return 2
+    problems = mapping_problems(mapping)
+    _print(
+        {
+            "mapping_id": mapping.get("mapping_id"),
+            "validated": not problems,
+            "problems": problems,
+            "real_store_connected": False,
+            "fixture_selectors_applied": False,
+        }
+    )
+    return 0 if not problems else 2
+
+
+def cmd_run(config_path: Path, *, once: bool, cycles: int) -> int:
+    config, problems = load_config(config_path)
+    if config is None:
+        _print({"ok": False, "problems": problems, "state": "stopped", "real_store_connected": False})
+        return 2
+    runner = _mapping_and_runner(config)
+    if once:
+        report = runner.run_once()
+    else:
+        report = runner.run_foreground(cycles, sleep_fn=time.sleep)
+    _print(report)
+    return _exit_for(report)
+
+
+def cmd_health(data_dir: Path, config_path: Path | None) -> int:
+    db_path = data_dir / "collector.sqlite"
+    if not db_path.exists():
+        _print(
+            {
+                "state": "stopped",
+                "state_reason": "never_started",
+                "real_store_connected": False,
+                "browser_launched": False,
+                "claims_user_wakeup": False,
+                "mapping_validated": False,
+                "sent_to_buyer": False,
+            }
+        )
+        return 0
+    config = None
+    mapping = None
+    if config_path is not None:
+        config, _problems = load_config(config_path)
+        if config is not None:
+            mapping, _errors = load_mapping_for(config)
+    store = Store(data_dir)
+    try:
+        _print(build_health(store, config, mapping, process_alive=False))
+    finally:
+        store.close()
+    return 0
+
+
+def cmd_resume(data_dir: Path, *, acknowledge_hard_stop: bool) -> int:
+    if not (data_dir / "collector.sqlite").exists():
+        _print({"ok": False, "problems": ["never_started"], "state": "stopped"})
+        return 2
+    store = Store(data_dir)
+    try:
+        state, reason = store.state_reason()
+        if reason == "failure_ceiling" and not acknowledge_hard_stop:
+            _print({"ok": False, "state": state, "state_reason": reason})
+            return 4
+        if state == "paused" or reason == "failure_ceiling":
+            with store.immediate():
+                store.clear_alerts()
+                if acknowledge_hard_stop:
+                    store.reset_failure()
+                store.set_state("stopped", "resumed_idle")
+        report_state, report_reason = store.state_reason()
+        _print({"ok": True, "state": report_state, "state_reason": report_reason, "real_store_connected": False})
+        return 0
+    finally:
+        store.close()
+
+
+def cmd_demo(data_dir: Path) -> int:
+    try:
+        assert_isolated_profile(data_dir)
+    except BrowserLaunchRefused as exc:
+        _print({"ok": False, "problems": [exc.code], "real_store_connected": False})
+        return 2
+    if data_dir.exists() and any(data_dir.iterdir()):
+        _print({"ok": False, "problems": ["demo_data_dir_not_empty"], "real_store_connected": False})
+        return 2
+    mapping_path = Path(__file__).resolve().parents[1] / "mappings" / "pinduoduo_chat_merchant.json"
+    from inbox_collector.mapping import load_mapping
+
+    mapping = load_mapping(mapping_path)
+    store = Store(data_dir)
+    try:
+        pipeline = Pipeline(store, MockProvider(), retention_days=30)
+        pipeline.observe(snapshot_from_dict(BASELINE_SNAPSHOT), failure_ceiling=3)
+        pipeline.observe(snapshot_from_dict(NEW_SNAPSHOT), failure_ceiling=3)
+        pipeline.generate()
+        store.set_state("stopped", "foreground_run_finished")
+        report = build_health(store, None, mapping, process_alive=False, provider=MockProvider())
+        spool = sorted((data_dir / "spool").glob("*.json"))
+        report["demo"] = True
+        report["spool_files"] = [path.name for path in spool]
+        report["browser_plan_launch"] = browser_plan_launch_refused()
+        _print(report)
+        return 0 if report["drafts_ready_for_review"] == 1 and report["real_store_connected"] is False else 2
+    finally:
+        store.close()
+
+
+def browser_plan_launch_refused() -> bool:
+    from inbox_collector.browser_plan import launch_independent_browser
+
+    try:
+        launch_independent_browser()
+    except BrowserLaunchRefused:
+        return True
+    return False
+
+
+def _exit_for(report: dict[str, Any]) -> int:
+    if report.get("readiness_problems"):
+        return 2
+    if report.get("state") == "paused":
+        return 3
+    if report.get("state_reason") == "failure_ceiling":
+        return 4
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="inbox-collector")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    check = sub.add_parser("check-config")
+    check.add_argument("--config", type=Path, required=True)
+
+    validate = sub.add_parser("validate-mapping")
+    validate.add_argument("--mapping", type=Path, required=True)
+
+    run = sub.add_parser("run")
+    run.add_argument("--config", type=Path, required=True)
+    run.add_argument("--once", action="store_true")
+    run.add_argument("--foreground", action="store_true")
+    run.add_argument("--cycles", type=int, default=1)
+
+    health = sub.add_parser("health")
+    health.add_argument("--data-dir", type=Path, required=True)
+    health.add_argument("--config", type=Path)
+
+    resume = sub.add_parser("resume")
+    resume.add_argument("--data-dir", type=Path, required=True)
+    resume.add_argument("--acknowledge-hard-stop", action="store_true")
+
+    demo = sub.add_parser("demo")
+    demo.add_argument("--data-dir", type=Path, required=True)
+
+    plan = sub.add_parser("browser-plan")
+    plan.add_argument("--config", type=Path, required=True)
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(list(argv) if argv is not None else None)
+    if args.command == "check-config":
+        return cmd_check(args.config)
+    if args.command == "validate-mapping":
+        return cmd_validate_mapping(args.mapping)
+    if args.command == "run":
+        if args.once == args.foreground:
+            _print(
+                {
+                    "ok": False,
+                    "problems": ["choose_exactly_one_of_once_or_foreground"],
+                    "state": "stopped",
+                    "real_store_connected": False,
+                }
+            )
+            return 2
+        if args.foreground and not 1 <= args.cycles <= 10:
+            _print({"ok": False, "problems": ["cycles_out_of_range"], "state": "stopped"})
+            return 2
+        return cmd_run(args.config, once=args.once, cycles=args.cycles)
+    if args.command == "health":
+        return cmd_health(args.data_dir, args.config)
+    if args.command == "resume":
+        return cmd_resume(args.data_dir, acknowledge_hard_stop=args.acknowledge_hard_stop)
+    if args.command == "demo":
+        return cmd_demo(args.data_dir)
+    if args.command == "browser-plan":
+        config, problems = load_config(args.config)
+        if config is None:
+            _print({"launch": False, "problems": problems, "verified": False})
+            return 2
+        try:
+            plan = browser_plan(config)
+        except BrowserLaunchRefused as exc:
+            _print({"launch": False, "verified": False, "problems": [exc.code]})
+            return 2
+        _print(plan)
+        return 2
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

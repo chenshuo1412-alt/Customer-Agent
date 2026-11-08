@@ -1,0 +1,23 @@
+{
+  "source_kind": "generic_fixture",
+  "page_state": "inbox",
+  "message_list_complete": true,
+  "observed_at": "2026-11-08T13:33:00+08:00",
+  "todo_count": 0,
+  "unread_count": 0,
+  "messages": [
+    {
+      "conversation_key": "conv-sim-1",
+      "identity_verified": true,
+      "message_id": "msg-sim-old",
+      "direction": "buyer",
+      "message_time": "2026-11-08T10:00:00+08:00",
+      "time_precision": "second",
+      "list_time_text": "10:00",
+      "body": "【模拟】更早的历史消息，建立基线，不生成草稿。",
+      "reply_status": "unreplied",
+      "reply_status_source": "fixture_field",
+      "reply_status_reliability": "reliable"
+    }
+  ]
+}
