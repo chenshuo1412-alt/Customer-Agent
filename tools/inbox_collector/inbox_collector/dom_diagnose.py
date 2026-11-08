@@ -636,22 +636,45 @@ _EXPORT_JS = """
   };
   const controlLabelKind = (el) => {
     const compact = String(el.innerText || el.textContent || "").replace(/\\s+/g, "");
+    if (!compact) return "empty";
     if (compact.length > 8) return "other_redacted";
     if (compact === "发送" || compact.toLowerCase() === "send") return "send";
     return "other_redacted";
   };
+  const controlRecord = (el) => {
+    const attrs = [];
+    for (const attr of Array.from(el.attributes || [])) {
+      const name = String(attr.name || "");
+      if (name === "tabindex" || name.indexOf("data-v-") === 0 || name === "value" || name === "placeholder") continue;
+      if (/^[A-Za-z_:][A-Za-z0-9_:-]{0,40}$/.test(name) && attrs.indexOf(name) < 0 && attrs.length < 8) attrs.push(name);
+    }
+    return {
+      tag: String(el.tagName || "").toLowerCase(),
+      classes: classesOf(el).slice(0, 4),
+      disabled: !!(el.disabled || el.getAttribute("aria-disabled") === "true"),
+      read_only: el.readOnly === true || el.getAttribute("readonly") !== null,
+      hidden: isHidden(el),
+      in_message_region: regionOf(el) === "message_container",
+      attr_names: attrs,
+      label_kind: controlLabelKind(el)
+    };
+  };
   const composerProbe = () => {
     const textareas = [];
-    const buttons = [];
+    const visibleButtons = [];
+    const nearInput = [];
     let passwordSkipped = 0;
     let editables = 0;
+    let hiddenButtons = 0;
     let chatVisible = 0;
     let chatHidden = 0;
     let ariaSelected = 0;
     let ariaCurrent = 0;
+    const visibleRows = [];
     const roots = [];
     for (const doc of seenDocs) roots.push(doc);
     for (const shadow of seenShadows) roots.push(shadow);
+    const anchors = [];
     for (const root of roots) {
       let controls = [];
       try {
@@ -664,44 +687,73 @@ _EXPORT_JS = """
           if (type === "password" || type === "hidden" || type === "file") { passwordSkipped += 1; continue; }
           if (type !== "text" && type !== "search") continue;
         }
-        const attrs = [];
-        for (const attr of Array.from(el.attributes || [])) {
-          const name = String(attr.name || "");
-          if (name === "tabindex" || name.indexOf("data-v-") === 0 || name === "value" || name === "placeholder") continue;
-          if (/^[A-Za-z_:][A-Za-z0-9_:-]{0,40}$/.test(name) && attrs.indexOf(name) < 0 && attrs.length < 8) attrs.push(name);
-        }
-        const record = {
-          tag,
-          classes: classesOf(el).slice(0, 4),
-          disabled: !!(el.disabled || el.getAttribute("aria-disabled") === "true"),
-          read_only: el.readOnly === true || el.getAttribute("readonly") !== null,
-          hidden: isHidden(el),
-          in_message_region: regionOf(el) === "message_container",
-          attr_names: attrs
-        };
+        const record = controlRecord(el);
         if (tag === "textarea" || tag === "input") {
           if (textareas.length < 8) textareas.push(record);
-        } else if (String(el.getAttribute("contenteditable") || "") === "true") {
+          if (!record.hidden && !record.disabled) anchors.push(el);
+        } else if (String(el.getAttribute("contenteditable") || "") === "true" && tag !== "textarea") {
           editables += 1;
-        } else if (buttons.length < 12) {
-          record.label_kind = controlLabelKind(el);
-          buttons.push(record);
+          if (!record.hidden) anchors.push(el);
+        } else if (record.hidden) {
+          hiddenButtons += 1;
+        } else if (visibleButtons.length < 12) {
+          visibleButtons.push(record);
         }
       }
       let items = [];
       try { items = root.querySelectorAll ? root.querySelectorAll("li.chat-item") : []; } catch (e) { items = []; }
       for (const item of items) {
-        if (isHidden(item)) chatHidden += 1;
-        else chatVisible += 1;
+        if (isHidden(item)) { chatHidden += 1; continue; }
+        chatVisible += 1;
         if (item.getAttribute("aria-selected") === "true") ariaSelected += 1;
         const current = item.getAttribute("aria-current");
         if (current === "true" || current === "page") ariaCurrent += 1;
+        const tokens = classesOf(item).slice();
+        for (const child of Array.from(item.children || []).slice(0, 6)) tokens.push(...classesOf(child));
+        visibleRows.push(tokens);
+      }
+    }
+    const seenNear = new Set();
+    for (const anchor of anchors.slice(0, 4)) {
+      const parents = [];
+      if (anchor.parentElement) parents.push(anchor.parentElement);
+      if (anchor.parentElement && anchor.parentElement.parentElement) parents.push(anchor.parentElement.parentElement);
+      parents.forEach((parent, depth) => {
+        for (const child of Array.from(parent.children || [])) {
+          if (child === anchor || seenNear.has(child) || nearInput.length >= 16) continue;
+          const tag = String(child.tagName || "").toLowerCase();
+          if (tag === "script" || tag === "style" || tag === "textarea") continue;
+          if (isHidden(child)) continue;
+          seenNear.add(child);
+          const record = controlRecord(child);
+          record.relation = depth === 0 ? "same_parent_as_input" : "within_input_grandparent";
+          nearInput.push(record);
+        }
+      });
+    }
+    const tokenCounts = new Map();
+    for (const tokens of visibleRows) {
+      for (const token of new Set(tokens)) tokenCounts.set(token, (tokenCounts.get(token) || 0) + 1);
+    }
+    const uniqueRowClasses = [];
+    if (visibleRows.length >= 2) {
+      for (const [token, count] of tokenCounts) {
+        if (count === 1 && uniqueRowClasses.length < 8) uniqueRowClasses.push(token);
       }
     }
     return {
-      textareas, buttons, editables, password_skipped: passwordSkipped,
-      chat_items_visible: chatVisible, chat_items_hidden: chatHidden,
-      aria_selected_true: ariaSelected, aria_current_true: ariaCurrent
+      textareas,
+      buttons: visibleButtons,
+      hidden_button_count: hiddenButtons,
+      near_input: nearInput,
+      editables,
+      password_skipped: passwordSkipped,
+      chat_items_visible: chatVisible,
+      chat_items_hidden: chatHidden,
+      aria_selected_true: ariaSelected,
+      aria_current_true: ariaCurrent,
+      unique_row_classes: uniqueRowClasses,
+      looked_at: ["aria-selected", "aria-current", "li.chat-item class names", "visible siblings of textarea or text input"]
     };
   };
   const buildReport = (firstPass, secondPass) => {
@@ -1060,16 +1112,19 @@ def _clean_controls(raw: Any, cap: int) -> list[dict[str, Any]]:
             if isinstance(name, str) and _ATTR_NAME.fullmatch(name) and name not in {"value", "placeholder"}
         ]
         label = item.get("label_kind")
+        relation = item.get("relation")
+        tag = item.get("tag")
         cleaned.append(
             {
-                "tag": item.get("tag") if item.get("tag") in {"textarea", "input", "button"} else "other",
+                "tag": tag if tag in {"textarea", "input", "button", "div", "span", "a", "i", "em", "svg", "li", "p"} else "other",
                 "classes": classes[:4],
                 "disabled": item.get("disabled") is True,
                 "read_only": item.get("read_only") is True,
                 "hidden": item.get("hidden") is True,
                 "in_message_region": item.get("in_message_region") is True,
                 "attr_names": names[:8],
-                "label_kind": label if label in {"send", "other_redacted"} else "other_redacted",
+                "label_kind": label if label in {"send", "empty", "other_redacted"} else "other_redacted",
+                "relation": relation if relation in {"same_parent_as_input", "within_input_grandparent"} else None,
             }
         )
     return cleaned
@@ -1079,26 +1134,42 @@ def _page_acceptance(preflight: dict[str, Any], raw_probe: Any) -> dict[str, Any
     probe = raw_probe if isinstance(raw_probe, dict) else {}
     textareas = _clean_controls(probe.get("textareas"), 8)
     buttons = _clean_controls(probe.get("buttons"), 12)
+    near_input = _clean_controls(probe.get("near_input"), 16)
     usable_inputs = [
         item for item in textareas if not item["hidden"] and not item["disabled"] and not item["read_only"]
     ]
     send_buttons = [
         item for item in buttons if item["label_kind"] == "send" and not item["hidden"] and not item["disabled"]
     ]
+    allowlist_hits = [
+        item for item in [*buttons, *near_input] if item["label_kind"] == "send" and not item["hidden"] and not item["disabled"]
+    ]
     selected = _clean_int(probe.get("aria_selected_true"))
     current = _clean_int(probe.get("aria_current_true"))
+    unique = [
+        token
+        for token in probe.get("unique_row_classes") or []
+        if isinstance(token, str) and _SAFE_CLASS.fullmatch(token)
+    ][:8]
+    visible_rows = _clean_int(probe.get("chat_items_visible"))
     if selected == 1 or current == 1:
         binding = "single_selection_attribute_unbound"
     elif selected > 1 or current > 1:
         binding = "selection_attribute_ambiguous"
+    elif unique:
+        binding = "unique_row_class_observed"
+    elif visible_rows >= 2:
+        binding = "no_aria_and_no_unique_row_class"
     else:
-        binding = "unproven_no_selection_attribute"
+        binding = "row_class_comparison_not_available"
     buyer = preflight.get("buyer_item") if isinstance(preflight.get("buyer_item"), dict) else {}
     inside = _clean_int(buyer.get("inside_merchant_message"))
     absent = _clean_int(buyer.get("absent"))
     visible = _clean_int(preflight.get("visible_rows"))
     checks = []
-    if binding != "single_selection_attribute_unbound":
+    if unique:
+        checks.append("请只回答当前高亮的会话行是否带有这些 class：" + "、".join(unique) + "。不要复制昵称或正文。")
+    elif binding != "single_selection_attribute_unbound":
         checks.append("请只看左侧当前打开的那一行是否高亮。不要复制昵称、id 或正文。")
     if visible and inside and absent:
         checks.append("请只回答：你确知的一条买家气泡和一条商家气泡，是否正好对应 buyer-item 的有无。不要粘贴正文。")
@@ -1111,6 +1182,9 @@ def _page_acceptance(preflight: dict[str, Any], raw_probe: Any) -> dict[str, Any
         "chat_items_hidden": _clean_int(probe.get("chat_items_hidden")),
         "aria_selected_true": selected,
         "aria_current_true": current,
+        "unique_row_classes": unique,
+        "selection_looked_at": ["aria-selected", "aria-current", "li.chat-item class names"],
+        "selection_absence_not_concluded": binding != "single_selection_attribute_unbound",
         "direction_evidence": "insufficient_name_not_used",
         "direction_split": {
             "mark_inside_wrapper": inside,
@@ -1126,8 +1200,13 @@ def _page_acceptance(preflight: dict[str, Any], raw_probe: Any) -> dict[str, Any
         "text_merge_applied": False,
         "inputs": textareas,
         "buttons": buttons,
+        "near_input": near_input,
         "usable_input_count": len(usable_inputs),
         "send_label_button_count": len(send_buttons),
+        "allowlist_send_label_hits": len(allowlist_hits),
+        "hidden_button_count": _clean_int(probe.get("hidden_button_count")),
+        "custom_visible_near_input_count": len(near_input),
+        "send_control_absence_not_concluded": True,
         "contenteditable_count": _clean_int(probe.get("editables")),
         "password_inputs_skipped": _clean_int(probe.get("password_skipped")),
         "official_composer_verified": False,

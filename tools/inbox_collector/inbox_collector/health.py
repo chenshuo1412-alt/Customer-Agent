@@ -91,5 +91,5 @@ def build_health(
         "auto_reply_enabled": False,
         "production_send_allowed": False,
         "generator_quality_verified": False,
-        "mac_ollama_contacted": False,
+        "ollama_http_observed_by_this_report": False,
     }

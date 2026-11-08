@@ -68,7 +68,9 @@ python -m inbox_collector diagnose-dom --data-dir data --timeout-seconds 5 --sum
 python -m inbox_collector auto-reply-sim
 ```
 
-通过时 `status` 是 `simulated_sent`，`generator_transport` 是 `urllib_loopback`，`composer_commits_seen` 是 1，`real_buyer_send` 和 `customer_service_quality_verified` 都是 false。冷启动先把当时可见的行记为历史，不回复；同文不同 id 的新行仍会各算一条。没有回执则 `paused_uncertain`，不会再发。`production_send_allowed` 仍是 false。
+通过时 `status` 是 `simulated_sent`，`generator_transport` 是 `urllib_loopback`，`process_loopback_http_completed` 是 true，并且 `process_loopback_http` 里有对本机 `127.0.0.1:11434` 的 `GET /api/tags` 和 `POST /api/generate`，状态 200。`composer_commits_seen` 是 1。`real_buyer_send` 和 `customer_service_quality_verified` 都是 false。云端测试用的是注入传输和临时端口，`injected_test_transport` 为 true，不会去绑定 11434。冷启动先把当时可见的行记为历史，不回复；同文不同 id 的新行仍会各算一条。没有回执则 `paused_uncertain`，不会再发。`production_send_allowed` 仍是 false。
+
+`page_acceptance` 里 `send_label_button_count` 为 0 不表示没有发送控件。同时看 `near_input` 的可见自定义节点、`allowlist_send_label_hits`，以及 `unique_row_classes`。`send_control_absence_not_concluded` 为 true 表示这次没有把“没看到 button”当成没有发送按钮。
 
 一次采样不能证明 id 换消息后仍稳定，所以 `can_use_for_dedupe` 保持 false。格式说明不会被当成时间；形状像时间也只记为需要人工确认含义，`can_treat_time_as_message_time` 保持 false。其它文字只记为 `other_redacted`。隐藏行、重复 id、或 `aria-rowcount` 大于当前渲染行数时，证据记为不充分。结果里的 `human_checks` 是最低必要的人工核对，不是采集成功。生产 mapping 仍是 false。
 

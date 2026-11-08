@@ -114,7 +114,6 @@ def gate_report(raw: dict[str, Any] | None = None) -> dict[str, Any]:
         "local_simulation_configured": enabled and scope == "local_simulation",
         "blockers": production_blockers(),
         "switch_bypasses_gates": False,
-        "mac_ollama_contacted": False,
         "customer_service_quality_verified": False,
         "routine_is_sync_generator": False,
         "real_buyer_send": False,
@@ -194,7 +193,6 @@ class LoopbackGenerator:
         self.base_url = require_loopback(base_url)
         self.transport = transport
         self.transport_label = transport_label
-        self.mac_ollama_contacted = False
         self.customer_service_quality_verified = False
         self.paths: list[str] = []
 
@@ -255,8 +253,18 @@ def urllib_loopback_transport(
     body: dict[str, Any] | None,
     timeout: int,
 ) -> tuple[int, dict[str, Any]]:
-    """Optional real loopback call. Tests must not use this; it is not the Mac."""
+    """Real HTTP to this process's 127.0.0.1:11434. Facts are appended for the report."""
     require_loopback(OLLAMA_ORIGIN)
+    fact = {
+        "via": "urllib",
+        "host": "127.0.0.1",
+        "port": 11434,
+        "method": method,
+        "path": path,
+        "completed": False,
+        "status": None,
+    }
+    urllib_loopback_transport.facts.append(fact)
     data = None if body is None else json.dumps(body).encode("utf-8")
     request = Request(
         OLLAMA_ORIGIN + path,
@@ -270,14 +278,43 @@ def urllib_loopback_transport(
             status = int(response.status)
     except HTTPError as exc:
         exc.close()
+        fact["status"] = int(exc.code)
         return int(exc.code), {}
     except (URLError, TimeoutError, json.JSONDecodeError):
+        fact["status"] = 0
         return 0, {}
+    fact["status"] = status
+    fact["completed"] = status == 200
     try:
         parsed = json.loads(raw.decode("utf-8"))
     except json.JSONDecodeError:
+        fact["completed"] = False
         return status, {}
     return status, parsed if isinstance(parsed, dict) else {}
+
+
+urllib_loopback_transport.facts = []  # type: ignore[attr-defined]
+
+
+def transport_audit(generator: LoopbackGenerator) -> dict[str, Any]:
+    """Separate a real loopback HTTP call from an injected test transport."""
+    if generator.transport_label != "urllib_loopback":
+        return {
+            "generator_transport": generator.transport_label,
+            "injected_test_transport": True,
+            "process_loopback_http": [],
+            "process_loopback_http_completed": False,
+            "customer_service_quality_verified": False,
+        }
+    facts = [dict(item) for item in urllib_loopback_transport.facts]
+    completed = bool(facts) and all(item.get("completed") is True and item.get("status") == 200 for item in facts)
+    return {
+        "generator_transport": "urllib_loopback",
+        "injected_test_transport": False,
+        "process_loopback_http": facts,
+        "process_loopback_http_completed": completed,
+        "customer_service_quality_verified": False,
+    }
 
 
 def _local_url(url: str) -> bool:
@@ -292,7 +329,6 @@ def _result(status: str, **extra: Any) -> dict[str, Any]:
         "real_buyer_send": False,
         "production_send_allowed": False,
         "production_blockers": production_blockers(),
-        "mac_ollama_contacted": False,
         "customer_service_quality_verified": False,
         "official_composer_verified": False,
         "switch_bypasses_gates": False,
@@ -300,7 +336,13 @@ def _result(status: str, **extra: Any) -> dict[str, Any]:
         "buyer_body_retained": False,
         "composer_commits": 0,
         "text_merge_applied": False,
+        "injected_test_transport": False,
+        "process_loopback_http": [],
+        "process_loopback_http_completed": False,
     }
+    generator = getattr(_result, "active_generator", None)
+    if isinstance(generator, LoopbackGenerator):
+        report.update(transport_audit(generator))
     report.update(extra)
     return report
 
@@ -378,6 +420,7 @@ def run_simulated_cycle(
     stopped: bool = False,
 ) -> dict[str, Any]:
     """One localhost simulated cycle. It never enables production sending."""
+    _result.active_generator = generator  # type: ignore[attr-defined]
     if not _local_url(str(getattr(page, "url", ""))):
         return _result("refused_not_local", simulated_controls_used=False)
     if stopped or store.get_meta("auto_reply_stopped") == "1":
@@ -585,8 +628,16 @@ _REVEAL_JS = """
 """
 
 
-def run_local_ollama_sim() -> dict[str, Any]:
-    """One isolated localhost profile. Uses this machine's 127.0.0.1:11434, not an injected double."""
+def run_local_ollama_sim(
+    *,
+    transport: Callable[[str, str, dict[str, Any] | None, int], tuple[int, dict[str, Any]]] | None = None,
+    transport_label: str = "urllib_loopback",
+) -> dict[str, Any]:
+    """Isolated localhost profile.
+
+    The command path uses urllib to 127.0.0.1:11434. Tests pass an injected
+    transport and must not label it urllib_loopback or bind that port.
+    """
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from tempfile import TemporaryDirectory
@@ -619,7 +670,13 @@ def run_local_ollama_sim() -> dict[str, Any]:
             browser = DedicatedBrowser(profile)
             browser.start()
             browser.page.goto(f"http://127.0.0.1:{port}/sim.html")
-            generator = LoopbackGenerator(urllib_loopback_transport, transport_label="urllib_loopback")
+            urllib_loopback_transport.facts.clear()
+            if transport is None:
+                transport = urllib_loopback_transport
+                transport_label = "urllib_loopback"
+            elif transport_label == "urllib_loopback":
+                raise AutoReplyError("injected_transport_must_be_labeled")
+            generator = LoopbackGenerator(transport, transport_label=transport_label)
             now = __import__("time").time()
             baseline = run_simulated_cycle(browser.page, store, generator, min_interval=0, max_per_hour=3, now=now)
             if baseline.get("status") != "baseline_established":
@@ -641,8 +698,6 @@ def run_local_ollama_sim() -> dict[str, Any]:
             outcome["isolated_profile"] = True
             outcome["merchant_profile_used"] = False
             outcome["profile_retained"] = False
-            outcome["generator_transport"] = "urllib_loopback"
-            outcome["mac_ollama_contacted"] = False
             outcome["customer_service_quality_verified"] = False
             outcome["resend_allowed"] = False
             if outcome.get("status") != "simulated_sent":

@@ -67,7 +67,7 @@ class AutoReplyGateTest(unittest.TestCase):
         self.assertIn("mapping_not_validated", report["blockers"])
         self.assertIn("official_composer_not_verified", report["blockers"])
         self.assertFalse(report["switch_bypasses_gates"])
-        self.assertFalse(report["mac_ollama_contacted"])
+        self.assertNotIn("mac_ollama_contacted", report)
         self.assertFalse(report["customer_service_quality_verified"])
         self.assertFalse(report["routine_is_sync_generator"])
         self.assertFalse(report["real_buyer_send"])
@@ -103,7 +103,8 @@ class AutoReplyGateTest(unittest.TestCase):
                 store.close()
         self.assertEqual(report["status"], "refused_not_local")
         self.assertEqual(page.located, [])
-        self.assertFalse(report["mac_ollama_contacted"])
+        self.assertTrue(report["injected_test_transport"])
+        self.assertFalse(report["process_loopback_http_completed"])
 
     def test_model_output_that_promises_a_refund_is_not_committed(self) -> None:
         def transport(method: str, path: str, body: dict | None, timeout: int) -> tuple[int, dict]:
@@ -136,7 +137,9 @@ class AutoReplyGateTest(unittest.TestCase):
         self.assertEqual(report["status"], "ollama_output_rejected")
         self.assertEqual(page.located, [])
         self.assertFalse(report["customer_service_quality_verified"])
-        self.assertFalse(report["mac_ollama_contacted"])
+        self.assertTrue(report["injected_test_transport"])
+        self.assertFalse(report["process_loopback_http_completed"])
+        self.assertEqual(report["process_loopback_http"], [])
 
     def test_missing_verified_model_does_not_call_generate(self) -> None:
         paths: list[str] = []
@@ -198,6 +201,41 @@ class AutoReplyGateTest(unittest.TestCase):
                 self.assertEqual(stopped["status"], "refused_stop")
             finally:
                 store.close()
+
+    def test_urllib_client_targets_11434_without_binding_it(self) -> None:
+        from unittest import mock
+
+        from inbox_collector.auto_reply import urllib_loopback_transport
+
+        seen: list[str] = []
+
+        class _Response:
+            status = 200
+
+            def read(self) -> bytes:
+                return b'{"models":[]}'
+
+            def __enter__(self) -> "_Response":
+                return self
+
+            def __exit__(self, *args: object) -> bool:
+                return False
+
+        def _open(request: object, timeout: int = 0) -> _Response:
+            seen.append(str(getattr(request, "full_url", "")))
+            self.assertEqual(timeout, 45)
+            return _Response()
+
+        urllib_loopback_transport.facts.clear()
+        with mock.patch("inbox_collector.auto_reply.urlopen", _open):
+            status, payload = urllib_loopback_transport("GET", "/api/tags", None, 45)
+        self.assertEqual(status, 200)
+        self.assertEqual(seen, ["http://127.0.0.1:11434/api/tags"])
+        self.assertEqual(urllib_loopback_transport.facts[0]["completed"], True)
+        self.assertEqual(urllib_loopback_transport.facts[0]["host"], "127.0.0.1")
+        self.assertEqual(urllib_loopback_transport.facts[0]["port"], 11434)
+        with self.assertRaises(AutoReplyError):
+            require_loopback("http://127.0.0.1:9")
 
     def test_gates_command_does_not_contact_a_generator(self) -> None:
         with TemporaryDirectory() as tmp:

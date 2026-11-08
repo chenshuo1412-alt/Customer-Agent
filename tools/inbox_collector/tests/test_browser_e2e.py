@@ -677,6 +677,17 @@ class BrowserE2ETest(unittest.TestCase):
                 "<p class='message-time'>2026-11-08 09:02</p></div></li></div>"
             ),
             "list-only": f"<ul class='chat-list-box'>{hidden_items}</ul>",
+            "custom-send": (
+                "<ul class='chat-list-box'>"
+                "<li class='chat-item is-active'><span class='mark'></span></li>"
+                "<li class='chat-item'></li><li class='chat-item'></li></ul>"
+                "<div class='content-box'>"
+                "<li class='onemsg' id='only-a'><div class='merchantMessage'></div></li>"
+                "<li class='onemsg' id='only-b'><div class='merchantMessage'></div></li></div>"
+                "<div class='composer'><textarea class='reply-editor'></textarea>"
+                "<div class='send-icon'></div></div>"
+                "<button hidden>隐藏按钮文字</button>"
+            ),
         }
         browser = DedicatedBrowser(self.data / "preflight-profile")
         browser.start()
@@ -701,6 +712,8 @@ class BrowserE2ETest(unittest.TestCase):
                 "id-alpha",
                 "id-beta",
                 "hunter2",
+                "only-a",
+                "隐藏按钮文字",
             ):
                 self.assertNotIn(secret, rendered, name)
             self.assertFalse(report["message_preflight"]["chat_item_counts_as_message_region"], name)
@@ -730,7 +743,9 @@ class BrowserE2ETest(unittest.TestCase):
         self.assertEqual(rows["id_shapes"]["other_shape"], 2)
         self.assertEqual(findings["rows"]["reason"], "message_rows_observed_direction_time_reply_unconfirmed")
         acceptance = findings["rows"]["page_acceptance"]
-        self.assertEqual(acceptance["conversation_binding"], "unproven_no_selection_attribute")
+        self.assertEqual(acceptance["conversation_binding"], "row_class_comparison_not_available")
+        self.assertTrue(acceptance["send_control_absence_not_concluded"])
+        self.assertGreaterEqual(acceptance["allowlist_send_label_hits"], 1)
         self.assertFalse(acceptance["conversation_bound_to_message_region"])
         self.assertEqual(acceptance["direction_evidence"], "insufficient_name_not_used")
         self.assertEqual(acceptance["direction_split"]["mark_inside_wrapper"], 1)
@@ -754,6 +769,20 @@ class BrowserE2ETest(unittest.TestCase):
         self.assertFalse(findings["list-only"]["message_region"]["reached"])
         self.assertEqual(findings["list-only"]["message_preflight"]["visible_rows"], 0)
         self.assertIn("chat-item", findings["list-only"]["message_region"]["conversation_list_landmarks"])
+        custom = findings["custom-send"]["page_acceptance"]
+        self.assertEqual(custom["conversation_binding"], "unique_row_class_observed")
+        self.assertIn("is-active", custom["unique_row_classes"])
+        self.assertTrue(custom["selection_absence_not_concluded"])
+        self.assertFalse(custom["official_composer_verified"])
+        self.assertTrue(custom["send_control_absence_not_concluded"])
+        self.assertEqual(custom["send_label_button_count"], 0)
+        self.assertGreaterEqual(custom["hidden_button_count"], 1)
+        near = [item for item in custom["near_input"] if "send-icon" in item["classes"]]
+        self.assertTrue(near)
+        self.assertEqual(near[0]["tag"], "div")
+        self.assertEqual(near[0]["label_kind"], "empty")
+        self.assertEqual(near[0]["relation"], "same_parent_as_input")
+        self.assertGreaterEqual(custom["custom_visible_near_input_count"], 1)
 
     def test_simulated_auto_reply_commits_on_localhost_only(self) -> None:
         from inbox_collector.auto_reply import LoopbackGenerator, run_simulated_cycle
@@ -839,7 +868,9 @@ class BrowserE2ETest(unittest.TestCase):
         self.assertEqual(first["status"], "simulated_sent")
         self.assertFalse(first["real_buyer_send"])
         self.assertFalse(first["production_send_allowed"])
-        self.assertFalse(first["mac_ollama_contacted"])
+        self.assertTrue(first["injected_test_transport"])
+        self.assertFalse(first["process_loopback_http_completed"])
+        self.assertEqual(first["process_loopback_http"], [])
         self.assertFalse(first["customer_service_quality_verified"])
         self.assertFalse(first["official_composer_verified"])
         self.assertFalse(first["text_merge_applied"])
@@ -1014,11 +1045,12 @@ class BrowserE2ETest(unittest.TestCase):
         self.assertEqual(captcha["status"], "refused_page_captcha")
         self.assertEqual(browser.page.evaluate("() => window.__sendClicks"), 0)
 
-    def test_auto_reply_sim_command_talks_to_loopback_not_a_double(self) -> None:
+    def test_auto_reply_sim_test_path_uses_ephemeral_port_not_11434(self) -> None:
         import threading
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from urllib.request import Request, urlopen
 
-        from inbox_collector.auto_reply import run_local_ollama_sim
+        from inbox_collector.auto_reply import AutoReplyError, require_loopback, run_local_ollama_sim
 
         seen: list[object] = []
 
@@ -1048,18 +1080,34 @@ class BrowserE2ETest(unittest.TestCase):
             def log_message(self, fmt: str, *args: object) -> None:
                 return
 
-        try:
-            stub = ThreadingHTTPServer(("127.0.0.1", 11434), _Stub)
-        except OSError as exc:
-            self.fail(f"127.0.0.1:11434 is not available for the loopback integration test: {exc}")
+        stub = ThreadingHTTPServer(("127.0.0.1", 0), _Stub)
+        port = int(stub.server_address[1])
+        self.assertNotEqual(port, 11434)
         worker = threading.Thread(target=stub.serve_forever, daemon=True)
         worker.start()
         self.addCleanup(stub.shutdown)
         self.addCleanup(stub.server_close)
-        report = run_local_ollama_sim()
+        with self.assertRaises(AutoReplyError):
+            require_loopback(f"http://127.0.0.1:{port}")
+
+        def transport(method: str, path: str, body: dict | None, timeout: int) -> tuple[int, dict]:
+            data = None if body is None else json.dumps(body).encode()
+            request = Request(
+                f"http://127.0.0.1:{port}{path}",
+                data=data,
+                method=method,
+                headers={} if data is None else {"Content-Type": "application/json"},
+            )
+            with urlopen(request, timeout=timeout) as response:
+                payload = json.loads(response.read().decode())
+            return int(response.status), payload
+
+        report = run_local_ollama_sim(transport=transport, transport_label="injected_test_double")
         self.assertEqual(report["status"], "simulated_sent")
-        self.assertEqual(report["generator_transport"], "urllib_loopback")
-        self.assertFalse(report["mac_ollama_contacted"])
+        self.assertEqual(report["generator_transport"], "injected_test_double")
+        self.assertTrue(report["injected_test_transport"])
+        self.assertFalse(report["process_loopback_http_completed"])
+        self.assertEqual(report["process_loopback_http"], [])
         self.assertFalse(report["customer_service_quality_verified"])
         self.assertFalse(report["real_buyer_send"])
         self.assertFalse(report["production_send_allowed"])
