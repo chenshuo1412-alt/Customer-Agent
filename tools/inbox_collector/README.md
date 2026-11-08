@@ -84,7 +84,15 @@ python -m inbox_collector diagnose-dom --data-dir data --timeout-seconds 5 --sum
 python -m inbox_collector confirmed-text-send --data-dir data --challenge '客服配对1109-A7' --reply '测试收到，客服回复链路验证中。' --buyer-source own-account --expires-seconds 600 --opt-in single-confirmed-text --timeout-seconds 60
 ```
 
-退出码 0 仅当 `status` 是 `page_visible`，并且 `delivery_claimed` 和 `production_send_allowed` 都是 false。其它状态退出码 2。
+退出码 0 仅当 `status` 是 `page_visible`，并且 `delivery_claimed` 和 `production_send_allowed` 都是 false。其它状态退出码 2。未知 `op`、`field_rejected`、`request_rejected` 也是退出码 2。
+
+已经 `paused_uncertain` 的 ledger 不能删，不能换窗口标记，也不能再写一份授权重发。下一次正常启动才能执行新的只读查询，当前旧进程不会有这个查询；现在不要为了看输入框布尔值去重载，否则框里的原文会丢掉：
+
+```bash
+python -m inbox_collector diagnose-dom --data-dir data --timeout-seconds 5 --op input-state-readonly --probe-phrase '客服配对1109-A7'
+```
+
+它只返回输入框是否非空、是否等于已授权原文、发送控件的标签和安全 class、可见验证码或错误标志，以及面板里精确匹配原文的条数。不导出其它输入框或客户文字，不点击。退出码 0 只表示读完了，不表示已发送或已送达。
 
 只对这一句发送一次，不是全店托管：
 

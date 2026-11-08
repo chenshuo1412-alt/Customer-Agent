@@ -1719,6 +1719,10 @@ def service_diagnose_request(
         from inbox_collector.confirmed_text import run_confirmed_text
 
         result = run_confirmed_text(page, data_dir, phrase, window_id=window_id)
+    elif isinstance(payload, dict) and payload.get("op") == "input-state-readonly":
+        from inbox_collector.confirmed_text import run_input_state
+
+        result = run_input_state(page, data_dir, phrase, window_id=window_id)
     elif isinstance(payload, dict) and payload.get("op") == "geometry-readonly":
         result = run_geometry(
             page,

@@ -11,7 +11,9 @@ from tempfile import TemporaryDirectory
 
 from inbox_collector.cli import main
 from inbox_collector.confirmed_text import (
-    _ACT_JS,
+    RECEIPT_WAIT_SECONDS,
+    _HANDLES_JS,
+    _OBSERVE_JS,
     _READ_JS,
     digest,
     reply_problem,
@@ -81,12 +83,14 @@ class ConfirmedTextTest(unittest.TestCase):
         from inbox_collector import confirmed_text
 
         source = Path(confirmed_text.__file__).read_text(encoding="utf-8")
-        script = _READ_JS + _ACT_JS
+        script = _READ_JS + _OBSERVE_JS + _HANDLES_JS
         for word in ("currentuid", "localStorage", "cookie", "userinfo", "csinfosmap", "fetch(", "WebSocket"):
             self.assertNotIn(word, script)
-        for word in ("ollama", "11434", "LoopbackGenerator"):
+        for word in ("ollama", "11434", "LoopbackGenerator", "new Event"):
             self.assertNotIn(word, source)
+        self.assertNotIn(".click()", script)
         self.assertNotIn("eval(", script)
+        self.assertGreaterEqual(RECEIPT_WAIT_SECONDS, 5)
         self.assertIsNone(reply_problem(_REPLY))
 
     def test_authorization_mismatches_do_not_read_the_page(self) -> None:
@@ -292,12 +296,22 @@ class ConfirmedTextTest(unittest.TestCase):
                 self.assertEqual(blocked["status"], "ledger_closed")
                 self.assertEqual(boom.calls, 2)
 
-                uncertain = run("uncertain", _ready("silent"))
+                page.set_content(_ready("silent"))
+                uncertain_dir = root / "uncertain"
+                uncertain_dir.mkdir()
+                write_authorization(uncertain_dir, challenge=_CHALLENGE, reply=_REPLY, window_id=window, expires_at=time.time() + 120)
+                uncertain = run_confirmed_text(page, uncertain_dir, _CHALLENGE, window_id=window, receipt_wait_seconds=0.4)
                 self.assertEqual(uncertain["status"], "paused_uncertain")
                 self.assertTrue(uncertain["clicked"])
                 self.assertTrue(uncertain["ledger_sealed"])
                 self.assertEqual(uncertain["receipt"], "absent")
                 self.assertFalse(uncertain["delivered_to_buyer"])
+                self.assertEqual(uncertain["input_method"], "playwright_fill")
+                self.assertEqual(uncertain["click_method"], "playwright_click")
+                self.assertEqual(uncertain["appearance"], "input_retained_receipt_absent")
+                self.assertTrue(uncertain["input_state"]["input_equals_reply"])
+                self.assertEqual(uncertain["input_state"]["reply_exact_count"], 0)
+                self.assertFalse(uncertain["platform_send_proven"])
                 (root / "uncertain" / "dom-diagnose.request").write_text(
                     json.dumps({"op": "confirmed-text", "probe_phrase": _CHALLENGE}, ensure_ascii=False),
                     encoding="utf-8",
@@ -310,6 +324,9 @@ class ConfirmedTextTest(unittest.TestCase):
                 ready = run("ready", _ready())
                 self.assertEqual(ready["status"], "page_visible")
                 self.assertEqual(ready["receipt"], "page_visible")
+                self.assertEqual(ready["input_method"], "playwright_fill")
+                self.assertEqual(ready["click_method"], "playwright_click")
+                self.assertEqual(ready["buyer_receipt"], "unproven")
                 self.assertTrue(ready["clicked"])
                 self.assertEqual(ready["highlight_count"], 2)
                 self.assertEqual(ready["row_id_sha256"], hashlib.sha256(_ROW_ID.encode()).hexdigest())
@@ -326,6 +343,160 @@ class ConfirmedTextTest(unittest.TestCase):
                 browser.close()
 
         self.assertEqual(digest(_REPLY), hashlib.sha256(_REPLY.encode()).hexdigest())
+
+    def test_rejected_operation_exits_nonzero(self) -> None:
+        import threading
+
+        from inbox_collector.cli import diagnose_exit_code
+
+        self.assertEqual(diagnose_exit_code("probe", {"status": "op_rejected", "handler": "request-router"}), 2)
+        self.assertEqual(diagnose_exit_code("probe", {"status": "field_rejected", "handler": "request-router"}), 2)
+        page = _Silent()
+        with TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            stop = threading.Event()
+
+            def serve() -> None:
+                while not stop.is_set():
+                    service_diagnose_request(page, data)
+                    time.sleep(0.05)
+
+            thread = threading.Thread(target=serve, daemon=True)
+            thread.start()
+            try:
+                code = main(
+                    [
+                        "diagnose-dom",
+                        "--data-dir",
+                        str(data),
+                        "--timeout-seconds",
+                        "2",
+                        "--op",
+                        "not-a-real-op",
+                        "--probe-phrase",
+                        "x",
+                    ]
+                )
+            finally:
+                stop.set()
+                thread.join(1)
+            self.assertEqual(code, 2)
+            result = json.loads((data / "dom-diagnose.result.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["status"], "op_rejected")
+            self.assertEqual(page.calls, 0)
+
+    def test_controlled_composer_matches_relayed_input_observation(self) -> None:
+        """Local sample only. A Projects Manager relay said the merchant box still showed the reply and no bubble; the image was not viewed here."""
+        from playwright.sync_api import sync_playwright
+
+        html = (
+            "<!DOCTYPE html><html><body>"
+            "<div class='content-box panel-a' style='width:640px'>"
+            f"<li class='onemsg' id='{_ROW_ID}'><div class='msg-content'>{_CHALLENGE}</div></li>"
+            "<div class='reply-box'><textarea id='composer' class='custom-scroll'></textarea>"
+            "<button id='send' type='button' class='send-btn'>发送</button></div>"
+            "<div class='captcha'>验证码</div></div>"
+            "<textarea id='other'>客户秘密</textarea>"
+            "<script>window.__model='';window.__sent=0;"
+            "const field=document.querySelector('#composer');"
+            "field.addEventListener('input',(event)=>{if(!event.isTrusted)return;window.__model=field.value;});"
+            "document.querySelector('#send').addEventListener('click',(event)=>{if(!event.isTrusted)return;"
+            f"if(window.__model!=='{_REPLY}')return;window.__sent+=1;"
+            "const li=document.createElement('li');li.className='onemsg';"
+            "const span=document.createElement('span');span.className='bubble-text';span.textContent=window.__model;"
+            "li.appendChild(span);document.querySelector('.content-box').appendChild(li);"
+            "field.value='';window.__model='';});</script></body></html>"
+        )
+        window = "12" * 16
+        with TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(headless=True)
+                page = browser.new_page()
+                page.set_content(html)
+                page.evaluate(
+                    """(reply) => {
+                      const field = document.querySelector('#composer');
+                      field.value = reply;
+                      field.dispatchEvent(new Event('input', { bubbles: true }));
+                      document.querySelector('#send').click();
+                    }""",
+                    _REPLY,
+                )
+                self.assertEqual(page.locator("#composer").input_value(), _REPLY)
+                self.assertEqual(page.evaluate("() => window.__model"), "")
+                self.assertEqual(page.evaluate("() => window.__sent"), 0)
+                self.assertEqual(page.locator("span.bubble-text").count(), 0)
+                page.evaluate("() => { document.querySelector('#composer').value = ''; }")
+                write_authorization(data, challenge=_CHALLENGE, reply=_REPLY, window_id=window, expires_at=time.time() + 120)
+                sent = run_confirmed_text(page, data, _CHALLENGE, window_id=window, receipt_wait_seconds=2)
+                self.assertEqual(sent["status"], "page_visible")
+                self.assertEqual(sent["input_method"], "playwright_fill")
+                self.assertEqual(sent["click_method"], "playwright_click")
+                self.assertEqual(sent["clicked_tag"], "button")
+                self.assertIn("send-btn", sent["clicked_classes"])
+                self.assertFalse(sent["delivery_claimed"])
+                self.assertEqual(sent["buyer_receipt"], "unproven")
+                self.assertEqual(page.evaluate("() => window.__sent"), 1)
+                self.assertEqual(page.locator("span.bubble-text").inner_text(), _REPLY)
+                self.assertNotIn(_REPLY, json.dumps(sent, ensure_ascii=False))
+                blocked = run_confirmed_text(page, data, _CHALLENGE, window_id=window)
+                self.assertEqual(blocked["status"], "ledger_closed")
+                self.assertEqual(page.evaluate("() => window.__sent"), 1)
+
+                held = html.replace(
+                    "<textarea id='composer' class='custom-scroll'></textarea>",
+                    f"<textarea id='composer' class='custom-scroll'>{_REPLY}</textarea>",
+                )
+                page.set_content(held)
+                page.evaluate("() => { window.__clicks = 0; document.querySelector('#send').addEventListener('click', () => { window.__clicks += 1; }); }")
+                state_dir = data / "state"
+                state_dir.mkdir()
+                write_authorization(state_dir, challenge=_CHALLENGE, reply=_REPLY, window_id=window, expires_at=time.time() - 5)
+                ledger = state_dir / "confirmed-text.ledger.json"
+                ledger.write_text(
+                    json.dumps(
+                        {
+                            "sealed": True,
+                            "state": "uncertain",
+                            "retry_allowed": False,
+                            "challenge_sha256": digest(_CHALLENGE),
+                            "reply_sha256": digest(_REPLY),
+                            "durable": False,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                auth_bytes = (state_dir / "confirmed-text.auth.json").read_bytes()
+                ledger_bytes = ledger.read_bytes()
+                (state_dir / "dom-diagnose.request").write_text(
+                    json.dumps({"op": "input-state-readonly", "probe_phrase": _CHALLENGE}, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                service_diagnose_request(page, state_dir, window_id="zz" * 16)
+                report = json.loads((state_dir / "dom-diagnose.result.json").read_text(encoding="utf-8"))
+                blob = json.dumps(report, ensure_ascii=False)
+                self.assertEqual(report["status"], "input_state_ready")
+                self.assertTrue(report["input_state"]["input_equals_reply"])
+                self.assertTrue(report["input_state"]["input_nonempty"])
+                self.assertEqual(report["input_state"]["reply_exact_count"], 0)
+                self.assertEqual(report["input_state"]["reply_age"], "unproven_single_snapshot")
+                self.assertTrue(report["input_state"]["visible_captcha"])
+                self.assertTrue(report["ledger_sealed"])
+                self.assertFalse(report["retry_allowed"])
+                self.assertFalse(report["window_matches"])
+                self.assertTrue(report["authorization_expired"])
+                self.assertTrue(report["files_unchanged"])
+                self.assertNotIn("客户秘密", blob)
+                self.assertNotIn("验证码", blob)
+                self.assertNotIn(_REPLY, blob)
+                self.assertEqual((state_dir / "confirmed-text.auth.json").read_bytes(), auth_bytes)
+                self.assertEqual(ledger.read_bytes(), ledger_bytes)
+                self.assertEqual(page.evaluate("() => window.__clicks"), 0)
+                refused = run_confirmed_text(page, state_dir, _CHALLENGE, window_id=window)
+                self.assertEqual(refused["status"], "ledger_closed")
+                self.assertEqual(page.locator("#composer").input_value(), _REPLY)
+                browser.close()
 
 
 if __name__ == "__main__":

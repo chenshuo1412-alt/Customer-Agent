@@ -195,12 +195,31 @@ def cmd_diagnose_dom(
         op=op,
         keep_local_detail=keep_local_detail,
     )
-    if summary and isinstance(payload, dict) and payload.get("handler") != "geometry-readonly" and payload.get("status") != "diagnostic_error":
+    if (
+        summary
+        and isinstance(payload, dict)
+        and payload.get("handler") not in {"geometry-readonly", "request-router", "input-state-readonly", "confirmed-text"}
+        and payload.get("status") not in {"diagnostic_error", "op_rejected", "field_rejected", "request_rejected"}
+    ):
         payload = _diagnose_summary(payload)
     _print(payload)
+    return diagnose_exit_code(op, payload)
+
+
+def diagnose_exit_code(op: str, payload: dict[str, Any] | None) -> int:
+    """Rejected operations exit 2. A completed read is not a send."""
+    if not isinstance(payload, dict):
+        return 2
+    status = payload.get("status")
+    if payload.get("handler") == "request-router" or status in {None, "diagnostic_error", "op_rejected", "field_rejected", "request_rejected", "phrase_leaked"}:
+        return 2
     if op == "geometry-readonly":
-        return 0 if payload.get("status") in {"geometry_ready", "structure_ready"} else 2
-    return 0 if payload.get("status") not in {None, "diagnostic_error"} else 2
+        return 0 if status in {"geometry_ready", "structure_ready"} else 2
+    if op == "input-state-readonly":
+        return 0 if status == "input_state_ready" else 2
+    if op == "confirmed-text":
+        return 0 if status == "page_visible" and payload.get("delivery_claimed") is False and payload.get("production_send_allowed") is False else 2
+    return 0
 
 
 def cmd_routine_setup(url: str, config_path: Path) -> int:
