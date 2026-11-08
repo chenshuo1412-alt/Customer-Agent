@@ -54,6 +54,16 @@ Profile 里会留下登录态，只放在本机，不要复制、同步或提交
 
 导出的仍是标签名、属性名、安全 class、frame 计数和来源分类、覆盖范围、真实截断原因，以及原来的值形状分类。`li.chat-item` 只算会话列表，不能单独让 `message_region` 为 true。消息 preflight 只在 `content-box` 里的 `li.onemsg` 上关联子孙时间节点和邻接日期头，`merchantMessage` / `buyer-item` 只记结构、不从名字判断方向，`isread` 只记 `read_unknown`。同一页会做两次观察比较可见行 id，但同页稳定不等于跨重启稳定。原始 id、正文、身份、日期原文和 URL 不会写出。生产 mapping 仍是 false。
 
+`login-prep` 正常结束时会关闭它启动的 Chrome。再次打开会复用 `data/own-browser-profile`，已写在这个 profile 里的登录可以留下来。不要附着 `remote-debugging-pipe`。旧进程不会执行新的 `geometry-readonly`；未知 `op` 会被拒绝，不会再静默退回整页导出。换成这一版之后，重复诊断只写请求文件。
+
+只读几何，不输入、不点击、不发送：
+
+```bash
+python -m inbox_collector diagnose-dom --data-dir data --timeout-seconds 5 --op geometry-readonly --probe-phrase '客服测试2006'
+```
+
+退出码 0 仅当 `status` 是 `geometry_ready`。其它明确状态退出码 2，字段仍然都在。`handler` 必须是 `geometry-readonly`。`samples` 为 8。`role_label` 只来自可见的买家、商家、客服原文标签，否则是 `unproven`。`buyer-item` 和左右位置都不是方向。`id.format` 为 `short_index_not_uid` 的短数字不能当会话标识。`conversation_link` 为 `uid_mismatch` 表示消息和当前选中行的 currentuid 哈希不一致。
+
 正在运行的旧 login-prep 不会执行短句核验或测试发送。换成这一版之后，重复诊断和一次测试发送只写请求文件。
 
 ```bash

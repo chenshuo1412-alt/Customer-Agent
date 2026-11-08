@@ -178,6 +178,8 @@ def cmd_diagnose_dom(
     *,
     summary: bool = False,
     probe_phrase: str = "",
+    op: str = "probe",
+    keep_local_detail: bool = False,
 ) -> int:
     """Ask the already-running login-prep process. Never starts a browser."""
     from inbox_collector.dom_diagnose import wait_for_diagnose_result
@@ -190,10 +192,14 @@ def cmd_diagnose_dom(
         data_dir,
         timeout_seconds=timeout_seconds,
         probe_phrase=probe_phrase,
+        op=op,
+        keep_local_detail=keep_local_detail,
     )
-    if summary and isinstance(payload, dict) and payload.get("status") != "diagnostic_error":
+    if summary and isinstance(payload, dict) and payload.get("handler") != "geometry-readonly" and payload.get("status") != "diagnostic_error":
         payload = _diagnose_summary(payload)
     _print(payload)
+    if op == "geometry-readonly":
+        return 0 if payload.get("status") == "geometry_ready" else 2
     return 0 if payload.get("status") not in {None, "diagnostic_error"} else 2
 
 
@@ -407,6 +413,8 @@ def build_parser() -> argparse.ArgumentParser:
     diagnose.add_argument("--timeout-seconds", type=float, default=2.0)
     diagnose.add_argument("--summary", action="store_true")
     diagnose.add_argument("--probe-phrase", default="")
+    diagnose.add_argument("--op", default="probe")
+    diagnose.add_argument("--keep-local-detail", action="store_true")
 
     test_send = sub.add_parser("test-send")
     test_send.add_argument("--data-dir", type=Path, required=True)
@@ -460,6 +468,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.timeout_seconds,
             summary=args.summary,
             probe_phrase=args.probe_phrase,
+            op=args.op,
+            keep_local_detail=args.keep_local_detail,
         )
     if args.command == "test-send":
         from inbox_collector.dom_diagnose import wait_for_diagnose_result

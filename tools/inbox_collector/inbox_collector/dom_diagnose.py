@@ -1700,10 +1700,22 @@ def service_diagnose_request(page: Any, data_dir: Path, *, timeout_seconds: floa
     except OSError:
         return
     phrase = payload.get("probe_phrase") if isinstance(payload, dict) and isinstance(payload.get("probe_phrase"), str) else ""
-    if isinstance(payload, dict) and payload.get("op") == "test-send":
+    from inbox_collector.geometry_readonly import reject_request, run_geometry
+
+    rejected = reject_request(payload)
+    if rejected is not None:
+        result = rejected
+    elif isinstance(payload, dict) and payload.get("op") == "test-send":
         from inbox_collector.test_send import run_owned_test_send
 
         result = run_owned_test_send(page, data_dir, phrase)
+    elif isinstance(payload, dict) and payload.get("op") == "geometry-readonly":
+        result = run_geometry(
+            page,
+            data_dir,
+            phrase,
+            keep_local_detail=payload.get("keep_local_detail") is True,
+        )
     else:
         result = export_rendered_dom(page, timeout_seconds=timeout_seconds, probe_phrase=phrase)
     target = data_dir / "dom-diagnose.result.json"
@@ -1720,6 +1732,7 @@ def wait_for_diagnose_result(
     timeout_seconds: float,
     probe_phrase: str = "",
     op: str = "probe",
+    keep_local_detail: bool = False,
 ) -> dict[str, Any]:
     """Ask the already-running owner to export. This function does not launch a browser."""
     import time
@@ -1728,11 +1741,13 @@ def wait_for_diagnose_result(
     if result_path.exists():
         result_path.unlink()
     request = data_dir / "dom-diagnose.request"
-    body: dict[str, str] = {}
-    if op == "test-send":
-        body["op"] = "test-send"
+    body: dict[str, Any] = {}
+    if op:
+        body["op"] = op
     if probe_phrase:
         body["probe_phrase"] = probe_phrase
+    if keep_local_detail:
+        body["keep_local_detail"] = True
     request.write_text(json.dumps(body, ensure_ascii=False) + "\n", encoding="utf-8")
     os.chmod(request, 0o600)
     deadline = time.monotonic() + timeout_seconds
