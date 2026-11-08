@@ -12,6 +12,7 @@
     "同一分钟、同一段预览可能对应多条消息。没有稳定 message id 时必须停止，不能靠预览去重。",
     "本文件不是可用选择器。validated 为 false 时实店模式必须停止并告警。",
     "禁止把 fixtures 里 generic-inbox 的 data-* 属性套到真实商家页面。",
-    "2026-11-08 diagnose-dom 看到 class 名 chat-list-box、chatWindowHeader，以及属性名 id、title、href、aria-label、msgtimeformate、threeminutesthreshold、data-clipboard-text。这些只是结构证据，不是选择器。缺少 data-message-id 不表示真实页面不可识别。随后的值特征诊断也只输出脱敏分类和数量；即使某一屏 id 唯一或时间形状可解析，在人工确认含义之前仍不能把 validated 改成 true。"
+    "2026-11-08 diagnose-dom 看到 class 名 chat-list-box、chatWindowHeader，以及属性名 id、title、href、aria-label、msgtimeformate、threeminutesthreshold、data-clipboard-text。这些只是结构证据，不是选择器。缺少 data-message-id 不表示真实页面不可识别。随后的值特征诊断也只输出脱敏分类和数量；即使某一屏 id 唯一或时间形状可解析，在人工确认含义之前仍不能把 validated 改成 true。",
+    "同一次 292 节点诊断的 max_depth 是 8，并看到 2 个 iframe，但没有 content-box、reply-box、li.chat-item。这是旧诊断的覆盖缺口：深度 8、不进入 iframe、不进入 shadow，而且节点数不到 300 时 truncated 仍为 false。不能据此说客服页没有消息区。validated 仍然是 false。"
   ]
 }

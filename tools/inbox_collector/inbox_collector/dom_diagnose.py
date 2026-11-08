@@ -22,13 +22,75 @@ _TIME_ATTRIBUTE_NAMES = frozenset({"msgtimeformate", "threeminutesthreshold"})
 _TEXT_CARRIER_NAMES = frozenset({"title", "aria-label", "href", "data-clipboard-text"})
 
 # Values are classified inside the page. Only counts and safe class tokens leave it.
+# Light-DOM landmark search is not capped at the old depth-8 export. Frames are
+# entered only when the document is already readable and the origin/path is in scope.
+_MESSAGE_LANDMARKS = frozenset({"content-box", "reply-box", "chat-item"})
+_LIST_LANDMARKS = frozenset({"chat-list-box", "chatWindowHeader"})
+_HISTORY_LANDMARKS = frozenset({"loadMoreMsg"})
+_FRAME_CATEGORIES = frozenset(
+    {
+        "same_origin_chat",
+        "local_test",
+        "blank_nested",
+        "unreadable",
+        "login_or_credential",
+        "payment",
+        "off_scope",
+    }
+)
+_FRAME_REASONS = frozenset(
+    {
+        "entered",
+        "access_denied",
+        "no_document",
+        "password_field",
+        "url_path",
+        "not_chat_merchant_frame",
+        "frame_nesting_limit",
+        "top_page",
+    }
+)
+_TRUNCATION_REASONS = frozenset(
+    {
+        "visit_limit",
+        "depth_limit",
+        "sample_limit",
+        "sample_depth",
+        "unreadable_frame",
+        "shadow_visit_limit",
+        "frame_nesting_limit",
+    }
+)
 _EXPORT_JS = """
 () => {
-  const root = document.body;
-  if (!root) return { error: "no_body" };
+  const MESSAGE = new Set(["content-box", "reply-box", "chat-item"]);
+  const LIST = new Set(["chat-list-box", "chatWindowHeader"]);
+  const HISTORY = new Set(["loadMoreMsg"]);
+  const VISIT_LIMIT = 12000;
+  const DEPTH_LIMIT = 64;
+  const FRAME_LIMIT = 3;
+  const SAMPLE_DEPTH = 16;
   const nodes = [];
+  const groups = [];
+  const frames = [];
+  const reasons = new Set();
+  const seenDocs = new Set();
+  const seenShadows = new Set();
+  const processedFrames = new Set();
+  const seenRows = new Set();
+  const landmarkEls = [];
+  let visits = 0;
+  let maxDepth = 0;
+  let omittedByDepth = 0;
+  let openShadow = 0;
+  let sampleOmitted = 0;
+  const shell = { generic_shell: 0, other_shape: 0, long_numeric: 0, long: 0 };
+  const sampleCounts = { message_container: 0, conversation_list: 0, unspecified: 0 };
+  const sampleCaps = { message_container: 160, conversation_list: 40, unspecified: 40 };
+
   const safeClass = (token) => /^[A-Za-z][A-Za-z_-]{0,48}$/.test(token);
   const classesOf = (el) => {
+    if (!el || !el.getAttribute) return [];
     const out = [];
     for (const token of String(el.getAttribute("class") || "").split(/\\s+/)) {
       if (token && safeClass(token)) out.push(token);
@@ -36,10 +98,21 @@ _EXPORT_JS = """
     return out;
   };
   const isHidden = (el) => {
-    if (!el || el === root) return false;
-    if (el.hidden || el.getAttribute("aria-hidden") === "true") return true;
-    const style = window.getComputedStyle(el);
-    return style.display === "none" || style.visibility === "hidden";
+    let cur = el;
+    let guard = 0;
+    while (cur && cur.nodeType === 1 && guard < 40) {
+      if (cur.hidden || (cur.getAttribute && cur.getAttribute("aria-hidden") === "true")) return true;
+      try {
+        const style = cur.ownerDocument.defaultView.getComputedStyle(cur);
+        if (style.display === "none" || style.visibility === "hidden") return true;
+      } catch (e) {
+        return false;
+      }
+      const root = cur.getRootNode ? cur.getRootNode() : null;
+      cur = cur.parentElement || (root && root.host) || null;
+      guard += 1;
+    }
+    return false;
   };
   const idShape = (value) => {
     if (!value) return "empty";
@@ -67,8 +140,72 @@ _EXPORT_JS = """
     return "other_redacted";
   };
   const bump = (bag, key) => { bag[key] = (bag[key] || 0) + 1; };
-  const walk = (el, depth, ancestorPath) => {
-    if (!el || depth > 8 || nodes.length >= 300) return;
+  const pageKind = () => {
+    const host = String(location.hostname || "").toLowerCase();
+    const path = String(location.pathname || "").toLowerCase();
+    const protocol = String(location.protocol || "");
+    if (/login|passport|password|signin/.test(path)) return "login_or_credential";
+    if (/pay|cashier|checkout|wallet/.test(path)) return "payment";
+    if (host === "mms.pinduoduo.com" && (path === "/chat-merchant" || path.startsWith("/chat-merchant/"))) return "chat_merchant";
+    if ((host === "127.0.0.1" || host === "localhost") && (protocol === "http:" || protocol === "https:")) return "local_test";
+    if (protocol === "file:") return "local_test";
+    return "off_scope";
+  };
+  const topKind = pageKind();
+  const chainDepth = (el) => {
+    let depth = 0;
+    let cur = el;
+    while (cur && depth < 80) {
+      const root = cur.getRootNode ? cur.getRootNode() : null;
+      const parent = cur.parentElement || (root && root.host) || null;
+      if (!parent) break;
+      cur = parent;
+      depth += 1;
+    }
+    if (depth > maxDepth) maxDepth = depth;
+    if (depth >= 80) reasons.add("depth_limit");
+    return depth;
+  };
+  const regionOf = (el) => {
+    let cur = el;
+    let guard = 0;
+    while (cur && guard < 80) {
+      const names = classesOf(cur);
+      if (names.some((name) => MESSAGE.has(name))) return "message_container";
+      if (names.some((name) => LIST.has(name))) return "conversation_list";
+      const root = cur.getRootNode ? cur.getRootNode() : null;
+      cur = cur.parentElement || (root && root.host) || null;
+      guard += 1;
+    }
+    return "unspecified";
+  };
+  const remember = (el, frameCategory, inShadow, inFrame) => {
+    const names = classesOf(el);
+    const wanted = names.filter((name) => MESSAGE.has(name) || LIST.has(name) || HISTORY.has(name));
+    if (!wanted.length) return;
+    landmarkEls.push({
+      el,
+      names: wanted,
+      depth: chainDepth(el),
+      hidden: isHidden(el),
+      frame_category: frameCategory,
+      in_shadow: inShadow === true,
+      in_frame: inFrame === true,
+      region: names.some((name) => MESSAGE.has(name)) ? "message_container" : (names.some((name) => LIST.has(name)) ? "conversation_list" : "history_control")
+    });
+  };
+  const markLandmarks = (root, frameCategory, inShadow, inFrame) => {
+    for (const name of ["content-box", "reply-box", "chat-item", "chat-list-box", "chatWindowHeader", "loadMoreMsg"]) {
+      let found = [];
+      try { found = root.querySelectorAll("." + name); } catch (e) { found = []; }
+      for (const el of found) remember(el, frameCategory, inShadow, inFrame);
+    }
+  };
+  const recordFrame = (category, reason, entered, nesting) => {
+    frames.push({ category, reason, entered: entered === true, nesting });
+  };
+  const childElements = (el) => Array.from(el.children || []);
+  const snapshotNode = (el, region, frameCategory, inShadow, depth) => {
     const attributes = [];
     let conversationSelected = null;
     for (const attr of Array.from(el.attributes || [])) {
@@ -77,29 +214,59 @@ _EXPORT_JS = """
         conversationSelected = attr.value === "true";
       }
     }
-    const classStructure = classesOf(el);
-    const path = ancestorPath.concat(classStructure.slice(0, 2)).slice(-4);
     nodes.push({
       tag: String(el.tagName || "").toLowerCase(),
       attributes,
-      class_structure: classStructure,
-      path,
+      class_structure: classesOf(el),
+      path: classesOf(el).slice(0, 3),
       conversation_selected: conversationSelected,
       depth,
-      child_element_count: el.children ? el.children.length : 0
+      child_element_count: el.children ? el.children.length : 0,
+      region,
+      frame_category: frameCategory,
+      in_shadow: inShadow === true,
+      hidden: isHidden(el)
     });
-    for (const child of Array.from(el.children || [])) walk(child, depth + 1, path);
   };
-  walk(root, 0, []);
-  const groups = [];
-  const seenRows = new Set();
-  const visit = (parent) => {
+  const exportTree = (el, region, frameCategory, inShadow, relative) => {
+    if (!el || el.nodeType !== 1 || exported.has(el)) return;
+    if (relative > SAMPLE_DEPTH) { reasons.add("sample_depth"); return; }
+    const bucket = sampleCaps[region] ? region : "unspecified";
+    if (sampleCounts[bucket] >= sampleCaps[bucket]) { sampleOmitted += 1; reasons.add("sample_limit"); return; }
+    exported.add(el);
+    sampleCounts[bucket] += 1;
+    snapshotNode(el, bucket, frameCategory, inShadow, chainDepth(el));
+    for (const child of childElements(el)) exportTree(child, bucket, frameCategory, inShadow, relative + 1);
+    if (el.shadowRoot) {
+      for (const child of childElements(el.shadowRoot)) exportTree(child, bucket, frameCategory, true, relative + 1);
+    }
+  };
+  const visit = (parent, depth, frameCategory, inShadow) => {
+    if (!parent || visits >= VISIT_LIMIT) { if (visits >= VISIT_LIMIT) reasons.add("visit_limit"); return; }
+    if (depth > DEPTH_LIMIT) {
+      reasons.add("depth_limit");
+      omittedByDepth += childElements(parent).length;
+      return;
+    }
     const buckets = new Map();
-    for (const child of Array.from(parent.children || [])) {
+    for (const child of childElements(parent)) {
+      visits += 1;
+      if (visits > VISIT_LIMIT) { reasons.add("visit_limit"); return; }
+      const selected = child.getAttribute && child.getAttribute("data-conversation-selected");
+      if (selected === "true" || selected === "false") snapshotNode(child, "unspecified", frameCategory, inShadow, depth + 1);
+      if (child.shadowRoot && !seenShadows.has(child.shadowRoot)) {
+        seenShadows.add(child.shadowRoot);
+        openShadow += 1;
+        markLandmarks(child.shadowRoot, frameCategory, true, frameCategory !== topKind);
+        let innerFrames = [];
+        try { innerFrames = child.shadowRoot.querySelectorAll("iframe"); } catch (e) { innerFrames = []; }
+        for (const iframe of innerFrames) considerFrame(iframe, frameCategory, 1);
+        visit(child.shadowRoot, depth + 1, frameCategory, true);
+      }
       const signature = child.tagName + "|" + classesOf(child).join(".");
       if (!buckets.has(signature)) buckets.set(signature, []);
       buckets.get(signature).push(child);
-      visit(child);
+      visit(child, depth + 1, frameCategory, inShadow);
     }
     for (const rows of buckets.values()) {
       if (rows.length < 2 || classesOf(rows[0]).length === 0) continue;
@@ -130,7 +297,7 @@ _EXPORT_JS = """
         bump(labels, labelKind(row.getAttribute("title")));
         bump(labels, labelKind(row.getAttribute("aria-label")));
       }
-      const declaredRaw = parent.getAttribute("aria-rowcount");
+      const declaredRaw = parent.getAttribute && parent.getAttribute("aria-rowcount");
       const declared = declaredRaw && /^\\d{1,6}$/.test(declaredRaw) ? Number(declaredRaw) : null;
       groups.push({
         tag: String(rows[0].tagName || "").toLowerCase(),
@@ -141,32 +308,306 @@ _EXPORT_JS = """
         hidden_count: hiddenCount,
         virtual_list: declared !== null && declared > rows.length,
         declared_row_count: declared,
+        region: regionOf(rows[0]),
+        frame_category: frameCategory,
         id: {
-          present: present,
-          distinct: seenIds.size,
-          duplicated,
-          shapes: idShapes,
-          uniqueness,
-          stability: "unproven_single_snapshot"
+          present, distinct: seenIds.size, duplicated, shapes: idShapes,
+          uniqueness, stability: "unproven_single_snapshot"
         },
-        time,
-        labels
+        time, labels
       });
     }
   };
-  visit(root);
-  const shell = { generic_shell: 0, other_shape: 0, long_numeric: 0, long: 0 };
   const shellWalk = (el) => {
-    if (!seenRows.has(el)) {
+    if (!el || visits > VISIT_LIMIT) { reasons.add("visit_limit"); return; }
+    if (el.nodeType === 1 && !seenRows.has(el)) {
       const idValue = el.getAttribute && el.getAttribute("id");
       if (idValue) shell[idShape(idValue)] += 1;
     }
-    for (const child of Array.from(el.children || [])) shellWalk(child);
+    for (const child of childElements(el)) {
+      visits += 1;
+      shellWalk(child);
+    }
   };
-  shellWalk(root);
-  return { nodes, truncated: nodes.length >= 300, value_assessment: { groups, shell_ids: shell } };
+  const considerFrame = (iframe, parentKind, nesting) => {
+    if (!iframe || processedFrames.has(iframe)) return;
+    processedFrames.add(iframe);
+    if (nesting > FRAME_LIMIT) {
+      recordFrame("off_scope", "frame_nesting_limit", false, nesting);
+      reasons.add("frame_nesting_limit");
+      return;
+    }
+    let doc = null;
+    try { doc = iframe.contentDocument; } catch (e) {
+      recordFrame("unreadable", "access_denied", false, nesting);
+      reasons.add("unreadable_frame");
+      return;
+    }
+    if (!doc) {
+      recordFrame("unreadable", "no_document", false, nesting);
+      reasons.add("unreadable_frame");
+      return;
+    }
+    let host = "", path = "", protocol = "", origin = "";
+    try {
+      host = String(doc.location.hostname || "").toLowerCase();
+      path = String(doc.location.pathname || "").toLowerCase();
+      protocol = String(doc.location.protocol || "");
+      origin = String(doc.location.origin || "");
+    } catch (e) {
+      recordFrame("unreadable", "access_denied", false, nesting);
+      reasons.add("unreadable_frame");
+      return;
+    }
+    let passwordField = false;
+    try { passwordField = !!doc.querySelector("input[type='password']"); }
+    catch (e) { passwordField = true; }
+    if (passwordField || /login|passport|password|signin/.test(path)) {
+      recordFrame("login_or_credential", passwordField ? "password_field" : "url_path", false, nesting);
+      return;
+    }
+    if (/pay|cashier|checkout|wallet/.test(path)) {
+      recordFrame("payment", "url_path", false, nesting);
+      return;
+    }
+    const parentOrigin = String(location.origin || "");
+    const blank = protocol === "about:";
+    const chat = host === "mms.pinduoduo.com" && (path === "/chat-merchant" || path.startsWith("/chat-merchant/"));
+    const localParent = parentKind === "local_test" || parentKind === "blank_nested" || parentKind === "chat_merchant" || parentKind === "same_origin_chat";
+    const localChild = (host === "127.0.0.1" || host === "localhost") && origin === parentOrigin && !path.startsWith("/off-scope/");
+    let category = "";
+    if (chat && origin === parentOrigin) category = "same_origin_chat";
+    else if (blank && localParent) category = "blank_nested";
+    else if ((parentKind === "local_test" || parentKind === "blank_nested") && localChild) category = "local_test";
+    if (!category) {
+      recordFrame("off_scope", "not_chat_merchant_frame", false, nesting);
+      return;
+    }
+    recordFrame(category, "entered", true, nesting);
+    explore(doc, category, nesting);
+  };
+  const explore = (doc, kind, nesting) => {
+    if (!doc || seenDocs.has(doc)) return;
+    seenDocs.add(doc);
+    const root = doc.body || doc.documentElement;
+    if (!root) return;
+    const inFrame = nesting > 0;
+    markLandmarks(doc, kind, false, inFrame);
+    let iframes = [];
+    try { iframes = doc.querySelectorAll("iframe"); } catch (e) { iframes = []; }
+    for (const iframe of iframes) considerFrame(iframe, kind, nesting + 1);
+    const shadowHosts = [];
+    try { shadowHosts.push(...doc.querySelectorAll("*")); } catch (e) { shadowHosts.length = 0; }
+    for (const el of shadowHosts) {
+      if (visits >= VISIT_LIMIT) { reasons.add("shadow_visit_limit"); break; }
+      visits += 1;
+      if (!el.shadowRoot || seenShadows.has(el.shadowRoot)) continue;
+      seenShadows.add(el.shadowRoot);
+      openShadow += 1;
+      markLandmarks(el.shadowRoot, kind, true, inFrame);
+      let innerFrames = [];
+      try { innerFrames = el.shadowRoot.querySelectorAll("iframe"); } catch (e) { innerFrames = []; }
+      for (const iframe of innerFrames) considerFrame(iframe, kind, nesting + 1);
+      visit(el.shadowRoot, 1, kind, true);
+    }
+    visit(root, 0, kind, false);
+    shellWalk(root);
+  };
+
+  if (topKind === "chat_merchant" || topKind === "local_test") explore(document, topKind, 0);
+  else recordFrame(topKind, "top_page", false, 0);
+
+  const exported = new Set();
+  const exportLandmark = (item) => {
+    exportTree(item.el, item.region === "history_control" ? "unspecified" : item.region, item.frame_category, item.in_shadow, 0);
+  };
+  for (const item of landmarkEls) if (item.region === "message_container") exportLandmark(item);
+  for (const item of landmarkEls) if (item.region === "conversation_list") exportLandmark(item);
+  if (!nodes.length && document.body) snapshotNode(document.body, "unspecified", topKind, false, 0);
+
+  const messageHits = landmarkEls.filter((item) => item.names.some((name) => MESSAGE.has(name)));
+  const listHits = landmarkEls.filter((item) => item.names.some((name) => LIST.has(name)));
+  const historyHits = landmarkEls.filter((item) => item.names.some((name) => HISTORY.has(name)));
+  const incomplete = reasons.size > 0;
+  return {
+    nodes,
+    truncated: incomplete,
+    truncation_reasons: Array.from(reasons),
+    coverage: {
+      top_page: topKind,
+      depth_limit: DEPTH_LIMIT,
+      visit_limit: VISIT_LIMIT,
+      sample_depth: SAMPLE_DEPTH,
+      max_depth_reached: maxDepth,
+      elements_visited: visits,
+      omitted_by_depth: omittedByDepth,
+      sample_omitted: sampleOmitted,
+      open_shadow_roots_entered: openShadow,
+      closed_shadow_not_observable: true,
+      incomplete,
+      reasons: Array.from(reasons)
+    },
+    frames: { items: frames },
+    message_region: {
+      reached: messageHits.length > 0,
+      hidden_only: messageHits.length > 0 && messageHits.every((item) => item.hidden),
+      in_frame: messageHits.some((item) => item.in_frame === true),
+      in_open_shadow: messageHits.some((item) => item.in_shadow),
+      landmarks: messageHits.reduce((bag, item) => bag.concat(item.names.filter((name) => MESSAGE.has(name))), []),
+      conversation_list_landmarks: listHits.reduce((bag, item) => bag.concat(item.names.filter((name) => LIST.has(name))), []),
+      history_controls: historyHits.reduce((bag, item) => bag.concat(item.names.filter((name) => HISTORY.has(name))), []),
+      max_landmark_depth: messageHits.reduce((deepest, item) => Math.max(deepest, item.depth), 0),
+      conversation_list_counted_as_messages: false
+    },
+    value_assessment: { groups, shell_ids: shell }
+  };
 }
 """
+
+
+def _unique(tokens: list[str]) -> list[str]:
+    seen: list[str] = []
+    for token in tokens:
+        if token not in seen:
+            seen.append(token)
+    return seen
+
+
+def _apply_scope(report: dict[str, Any], raw: dict[str, Any]) -> None:
+    """Attach frame and coverage facts. This cannot validate a production mapping."""
+    coverage_in = raw.get("coverage") if isinstance(raw.get("coverage"), dict) else None
+    frames_in = raw.get("frames") if isinstance(raw.get("frames"), dict) else None
+    region_in = raw.get("message_region") if isinstance(raw.get("message_region"), dict) else None
+    if coverage_in is None and frames_in is None and region_in is None:
+        report["coverage"] = {"source": "not_provided", "incomplete": False, "reasons": []}
+        report["frames"] = {"seen": 0, "entered": 0, "skipped": 0, "by_category": {}}
+        report["message_region"] = {
+            "reached": False,
+            "reason": "not_provided",
+            "conversation_list_counted_as_messages": False,
+        }
+        report["production_mapping_validated"] = False
+        report["collection_enabled"] = False
+        report["selectors_inferred"] = False
+        report["platform_unsupported"] = False
+        return
+    reasons = [
+        reason
+        for reason in (coverage_in or {}).get("reasons") or raw.get("truncation_reasons") or []
+        if reason in _TRUNCATION_REASONS
+    ]
+    reasons = _unique([str(reason) for reason in reasons])
+    incomplete = bool(reasons)
+    items_in = frames_in.get("items") if isinstance(frames_in, dict) else None
+    items: list[dict[str, Any]] = []
+    by_category: dict[str, int] = {}
+    if isinstance(items_in, list):
+        for item in items_in[:40]:
+            if not isinstance(item, dict):
+                continue
+            category = item.get("category")
+            reason = item.get("reason")
+            if category not in _FRAME_CATEGORIES:
+                category = "off_scope"
+            if reason not in _FRAME_REASONS:
+                reason = "not_chat_merchant_frame"
+            entered = item.get("entered") is True and category in {
+                "same_origin_chat",
+                "local_test",
+                "blank_nested",
+            }
+            items.append(
+                {
+                    "category": category,
+                    "reason": reason,
+                    "entered": entered,
+                    "nesting": _clean_int(item.get("nesting")),
+                }
+            )
+            by_category[category] = by_category.get(category, 0) + 1
+    entered = sum(1 for item in items if item["entered"])
+    message_names = [
+        name
+        for name in (region_in or {}).get("landmarks") or []
+        if name in _MESSAGE_LANDMARKS
+    ]
+    list_names = [
+        name
+        for name in (region_in or {}).get("conversation_list_landmarks") or []
+        if name in _LIST_LANDMARKS
+    ]
+    history_names = [
+        name
+        for name in (region_in or {}).get("history_controls") or []
+        if name in _HISTORY_LANDMARKS
+    ]
+    reached = bool(message_names) and (region_in or {}).get("reached") is not False
+    top_page = (coverage_in or {}).get("top_page")
+    if top_page not in {"chat_merchant", "local_test", "login_or_credential", "payment", "off_scope"}:
+        top_page = "off_scope"
+    if reached:
+        region_reason = "observed"
+    elif top_page in {"login_or_credential", "payment", "off_scope"}:
+        region_reason = "top_page_off_scope"
+    elif incomplete:
+        region_reason = (
+            "conversation_list_observed_message_region_not_sampled"
+            if list_names
+            else "not_in_sampled_range"
+        )
+    else:
+        region_reason = "not_observed_within_bounds"
+    report["coverage"] = {
+        "source": "in_page",
+        "top_page": top_page,
+        "depth_limit": _clean_int((coverage_in or {}).get("depth_limit")) or None,
+        "visit_limit": _clean_int((coverage_in or {}).get("visit_limit")) or None,
+        "sample_depth": _clean_int((coverage_in or {}).get("sample_depth")) or None,
+        "max_depth_reached": _clean_int((coverage_in or {}).get("max_depth_reached")),
+        "elements_visited": _clean_int((coverage_in or {}).get("elements_visited")),
+        "omitted_by_depth": _clean_int((coverage_in or {}).get("omitted_by_depth")),
+        "sample_omitted": _clean_int((coverage_in or {}).get("sample_omitted")),
+        "open_shadow_roots_entered": _clean_int((coverage_in or {}).get("open_shadow_roots_entered")),
+        "closed_shadow_not_observable": True,
+        "incomplete": incomplete,
+        "reasons": reasons,
+    }
+    report["frames"] = {
+        "seen": len(items),
+        "entered": entered,
+        "skipped": len(items) - entered,
+        "by_category": by_category,
+        "items": items,
+    }
+    report["message_region"] = {
+        "reached": reached,
+        "reason": region_reason,
+        "hidden_only": reached and (region_in or {}).get("hidden_only") is True,
+        "in_frame": reached and (region_in or {}).get("in_frame") is True,
+        "in_open_shadow": reached and (region_in or {}).get("in_open_shadow") is True,
+        "landmarks": _unique(message_names),
+        "conversation_list_landmarks": _unique(list_names),
+        "history_controls": _unique(history_names),
+        "max_landmark_depth": _clean_int((region_in or {}).get("max_landmark_depth")),
+        "conversation_list_counted_as_messages": False,
+        "structure_exported": any(
+            node.get("region") == "message_container" for node in report.get("nodes") or []
+        ),
+    }
+    report["truncated"] = bool(report.get("truncated") or incomplete)
+    report["production_mapping_validated"] = False
+    report["collection_enabled"] = False
+    report["selectors_inferred"] = False
+    report["selector_candidates"] = []
+    report["platform_unsupported"] = False
+    if report.get("status") in {"conversation_not_selected", "structure_observed", "diagnostic_error"}:
+        return
+    if reached:
+        report["status"] = "identity_unproven"
+        report["reason"] = "message_region_observed_identity_unproven"
+    elif incomplete or top_page in {"login_or_credential", "payment", "off_scope"}:
+        report["status"] = "coverage_incomplete"
+        report["reason"] = region_reason
 
 
 def export_rendered_dom(page: Any, *, timeout_seconds: float = 2.0) -> dict[str, Any]:
@@ -187,6 +628,7 @@ def export_rendered_dom(page: Any, *, timeout_seconds: float = 2.0) -> dict[str,
         return _error("no_rendered_elements")
     report = _classify(nodes, truncated=bool(raw.get("truncated")))
     report["value_assessment"] = _value_decisions(raw.get("value_assessment"))
+    _apply_scope(report, raw)
     return report
 
 
@@ -268,6 +710,8 @@ def _classify(nodes: list[Any], *, truncated: bool = False) -> dict[str, Any]:
             if isinstance(token, str) and _SAFE_CLASS.fullmatch(token)
         ]
         shell_classes.update(token for token in class_structure if token in _OBSERVED_SHELL_CLASSES)
+        region = node.get("region")
+        frame_category = node.get("frame_category")
         cleaned.append(
             {
                 "tag": str(node.get("tag") or ""),
@@ -276,6 +720,10 @@ def _classify(nodes: list[Any], *, truncated: bool = False) -> dict[str, Any]:
                 "path": path,
                 "depth": int(node.get("depth") or 0),
                 "child_element_count": int(node.get("child_element_count") or 0),
+                "region": region if region in {"message_container", "conversation_list", "unspecified"} else "unspecified",
+                "frame_category": frame_category if frame_category in _FRAME_CATEGORIES or frame_category in {"chat_merchant", "local_test"} else "unspecified",
+                "in_shadow": node.get("in_shadow") is True,
+                "hidden": node.get("hidden") is True,
             }
         )
     if not cleaned:
@@ -454,6 +902,9 @@ def _value_decisions(raw: Any) -> dict[str, Any]:
                         for key in ("buyer", "merchant", "replied", "unreplied", "other_redacted", "empty")
                     },
                     "row_identity": "unproven",
+                    "region": item.get("region")
+                    if item.get("region") in {"message_container", "conversation_list", "unspecified"}
+                    else "unspecified",
                 }
             )
     shell = {

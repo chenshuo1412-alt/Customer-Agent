@@ -79,7 +79,15 @@ class _Handler(BaseHTTPRequestHandler):
         hosts = getattr(self.server, "hosts", None)
         if isinstance(hosts, list):
             hosts.append(self.headers.get("Host", ""))
-        body = self.server.html_path.read_bytes()  # type: ignore[attr-defined]
+        path = self.path.split("?", 1)[0]
+        routes = getattr(self.server, "routes", None)
+        if isinstance(routes, dict) and path in routes:
+            body = routes[path]
+        elif path == "/inbox.html":
+            body = self.server.html_path.read_bytes()  # type: ignore[attr-defined]
+        else:
+            self.send_error(404)
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
@@ -447,6 +455,178 @@ class BrowserE2ETest(unittest.TestCase):
         self.assertTrue(findings["unique-once"]["human_checks"])
         self.assertTrue(findings["parsed-time"]["human_checks"])
         self.assertTrue(findings["labels"]["human_checks"])
+
+    def test_message_region_coverage_is_not_the_shallow_list(self) -> None:
+        from inbox_collector.browser_session import DedicatedBrowser
+        from inbox_collector.dom_diagnose import export_rendered_dom
+
+        deep = "<ul><li class='chat-item'></li><li class='chat-item'></li></ul>"
+        deep = f"<div class='reply-box'>{deep}</div>"
+        deep = f"<div class='content-box'>{deep}</div>"
+        for _ in range(20):
+            deep = f"<div class='wrap'>{deep}</div>"
+        buried = "<li class='chat-item'></li>"
+        for _ in range(70):
+            buried = f"<div class='wrap'>{buried}</div>"
+        sample = "<li class='chat-item'></li><li class='chat-item'></li>"
+        for _ in range(30):
+            sample = f"<div class='wrap'>{sample}</div>"
+        self.server.routes = {  # type: ignore[attr-defined]
+            "/nested.html": b"<!DOCTYPE html><body><iframe src='/message.html'></iframe></body></html>",
+            "/message.html": (
+                "<!DOCTYPE html><body>" + deep + "<p>BUBBLE-TEXT-77</p></body></html>"
+            ).encode(),
+            "/pay/checkout.html": b"<!DOCTYPE html><body><div class='content-box'>PAY-SECRET</div></body></html>",
+            "/off-scope/app.html": b"<!DOCTYPE html><body><div class='content-box'>OFF-SECRET</div></body></html>",
+            "/login/page.html": (
+                b"<!DOCTYPE html><body><input type='password' value='hunter2'>"
+                b"<div class='content-box'>LOGIN-SECRET</div></body></html>"
+            ),
+        }
+        pages = {
+            "framed": (
+                "<div class='chat-list-box'><div class='conv'></div><div class='conv'></div></div>"
+                "<div class='loadMoreMsg'></div><iframe src='/nested.html'></iframe>"
+            ),
+            "deep-main": (
+                "<div class='chat-list-box'><div class='conv'></div><div class='conv'></div></div>" + deep
+            ),
+            "hidden": (
+                "<div class='content-box' hidden><div class='reply-box' style='display:none'>"
+                "<ul><li class='chat-item' hidden></li><li class='chat-item' hidden></li></ul>"
+                "</div></div>"
+            ),
+            "unreadable": (
+                "<div class='chat-list-box'><div class='conv'></div><div class='conv'></div></div>"
+                "<iframe sandbox srcdoc=\"<div class='content-box'>SECRET-BUBBLE-991</div>\"></iframe>"
+            ),
+            "password": (
+                "<div class='chat-list-box'></div>"
+                "<iframe srcdoc=\"<input type='password' value='hunter2'>"
+                "<div class='content-box'><li class='chat-item'>SECRET-ROLE</li></div>\"></iframe>"
+            ),
+            "payment": "<div class='chat-list-box'></div><iframe src='/pay/checkout.html'></iframe>",
+            "offscope": "<div class='chat-list-box'></div><iframe src='/off-scope/app.html'></iframe>",
+            "shadow": "<div id='host'></div><div class='chat-list-box'></div>",
+            "closed-shadow": "<div id='host'></div><div class='chat-list-box'></div>",
+            "sample-depth": f"<div class='content-box'>{sample}</div>",
+            "depth-limit": f"<div class='chat-list-box'></div><div class='content-box'>{buried}</div>",
+            "login-top": "<div class='content-box'>LOGIN-SECRET</div>",
+        }
+        browser = DedicatedBrowser(self.data / "coverage-profile")
+        browser.start()
+        self.addCleanup(browser.close)
+        pid = browser.pid
+        findings = {}
+        for name, inner in pages.items():
+            target = "/login/page.html" if name == "login-top" else "/inbox.html"
+            if target == "/inbox.html":
+                self.html_path.write_text(
+                    f"<!DOCTYPE html><body>{inner}</body></html>",
+                    encoding="utf-8",
+                )
+            browser.page.goto(f"http://127.0.0.1:{self.port}{target}")
+            if name == "shadow":
+                browser.page.evaluate(
+                    "() => { const root = document.querySelector('#host').attachShadow({mode:'open'});"
+                    " root.innerHTML = \"<div class='content-box'><ul><li class='chat-item'></li>"
+                    "<li class='chat-item'>SHADOW-SECRET</li></ul></div>\"; }"
+                )
+            if name == "closed-shadow":
+                browser.page.evaluate(
+                    "() => { const root = document.querySelector('#host').attachShadow({mode:'closed'});"
+                    " root.innerHTML = \"<div class='content-box'>CLOSED-SECRET</div>\"; }"
+                )
+            before = browser.page.url
+            report = export_rendered_dom(browser.page, timeout_seconds=5)
+            self.assertEqual(browser.page.url, before, name)
+            self.assertEqual(browser.pid, pid, name)
+            rendered = json.dumps(report, ensure_ascii=False)
+            for secret in (
+                "BUBBLE-TEXT-77",
+                "SECRET-BUBBLE-991",
+                "SECRET-ROLE",
+                "PAY-SECRET",
+                "OFF-SECRET",
+                "LOGIN-SECRET",
+                "SHADOW-SECRET",
+                "CLOSED-SECRET",
+                "hunter2",
+                "/message.html",
+                "/nested.html",
+                "/pay/checkout.html",
+                "/off-scope/app.html",
+                "token=",
+            ):
+                self.assertNotIn(secret, rendered, name)
+            self.assertFalse(report["platform_unsupported"], name)
+            self.assertFalse(report["production_mapping_validated"], name)
+            self.assertFalse(report["collection_enabled"], name)
+            self.assertFalse(report["selectors_inferred"], name)
+            self.assertFalse(report["message_region"]["conversation_list_counted_as_messages"], name)
+            self.assertTrue(report["coverage"]["closed_shadow_not_observable"], name)
+            findings[name] = report
+        framed = findings["framed"]["message_region"]
+        self.assertTrue(framed["reached"])
+        self.assertTrue(framed["in_frame"])
+        self.assertFalse(framed["hidden_only"])
+        self.assertEqual(set(framed["landmarks"]), {"content-box", "reply-box", "chat-item"})
+        self.assertIn("chat-list-box", framed["conversation_list_landmarks"])
+        self.assertIn("loadMoreMsg", framed["history_controls"])
+        self.assertGreaterEqual(framed["max_landmark_depth"], 20)
+        self.assertGreaterEqual(findings["framed"]["frames"]["entered"], 2)
+        self.assertEqual(findings["framed"]["status"], "identity_unproven")
+        self.assertTrue(
+            any(node.get("class_structure") == ["chat-item"] for node in findings["framed"]["nodes"])
+        )
+        self.assertTrue(
+            any(
+                group.get("region") == "message_container"
+                for group in findings["framed"]["value_assessment"]["groups"]
+            )
+        )
+        self.assertTrue(findings["deep-main"]["message_region"]["reached"])
+        self.assertFalse(findings["deep-main"]["message_region"]["in_frame"])
+        self.assertGreaterEqual(findings["deep-main"]["message_region"]["max_landmark_depth"], 20)
+        self.assertFalse(findings["deep-main"]["coverage"]["incomplete"])
+        self.assertTrue(findings["hidden"]["message_region"]["reached"])
+        self.assertTrue(findings["hidden"]["message_region"]["hidden_only"])
+        unreadable = findings["unreadable"]
+        self.assertFalse(unreadable["message_region"]["reached"])
+        self.assertGreaterEqual(unreadable["frames"]["by_category"].get("unreadable", 0), 1)
+        self.assertTrue(unreadable["truncated"])
+        self.assertIn("unreadable_frame", unreadable["coverage"]["reasons"])
+        self.assertEqual(unreadable["status"], "coverage_incomplete")
+        self.assertEqual(
+            unreadable["message_region"]["reason"],
+            "conversation_list_observed_message_region_not_sampled",
+        )
+        self.assertGreaterEqual(findings["password"]["frames"]["by_category"].get("login_or_credential", 0), 1)
+        self.assertNotIn("content-box", findings["password"]["message_region"]["landmarks"])
+        self.assertGreaterEqual(findings["payment"]["frames"]["by_category"].get("payment", 0), 1)
+        self.assertNotIn("content-box", findings["payment"]["message_region"]["landmarks"])
+        self.assertGreaterEqual(findings["offscope"]["frames"]["by_category"].get("off_scope", 0), 1)
+        self.assertNotIn("content-box", findings["offscope"]["message_region"]["landmarks"])
+        self.assertTrue(findings["shadow"]["message_region"]["reached"])
+        self.assertTrue(findings["shadow"]["message_region"]["in_open_shadow"])
+        self.assertFalse(findings["closed-shadow"]["message_region"]["reached"])
+        self.assertEqual(
+            findings["closed-shadow"]["message_region"]["reason"],
+            "not_observed_within_bounds",
+        )
+        self.assertTrue(findings["sample-depth"]["message_region"]["reached"])
+        self.assertIn("sample_depth", findings["sample-depth"]["coverage"]["reasons"])
+        self.assertTrue(findings["sample-depth"]["truncated"])
+        self.assertIn("chat-item", findings["sample-depth"]["message_region"]["landmarks"])
+        self.assertTrue(findings["depth-limit"]["message_region"]["reached"])
+        self.assertIn("depth_limit", findings["depth-limit"]["coverage"]["reasons"])
+        self.assertTrue(findings["depth-limit"]["truncated"])
+        self.assertGreater(findings["depth-limit"]["coverage"]["omitted_by_depth"], 0)
+        login = findings["login-top"]
+        self.assertEqual(login["coverage"]["top_page"], "login_or_credential")
+        self.assertFalse(login["message_region"]["reached"])
+        self.assertEqual(login["status"], "coverage_incomplete")
+        self.assertEqual(login["frames"]["entered"], 0)
 
     def test_diagnose_uses_the_open_page_without_navigation(self) -> None:
         from inbox_collector.dom_diagnose import export_rendered_dom, service_diagnose_request

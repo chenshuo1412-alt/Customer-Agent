@@ -242,6 +242,64 @@ class DomDiagnoseTest(unittest.TestCase):
         self.assertFalse(report["value_assessment"]["can_use_for_dedupe"])
         self.assertFalse(report["value_assessment"]["can_treat_time_as_message_time"])
 
+    def test_frame_url_and_false_truncation_flag_are_not_trusted(self) -> None:
+        page = FakePage(
+            {
+                "nodes": [
+                    {
+                        "tag": "div",
+                        "attributes": ["class"],
+                        "class_structure": ["chat-list-box"],
+                        "path": ["chat-list-box"],
+                        "depth": 2,
+                        "child_element_count": 0,
+                    }
+                ],
+                "truncated": False,
+                "coverage": {
+                    "top_page": "https://mms.pinduoduo.com/chat-merchant/index.html?user=secret",
+                    "depth_limit": 64,
+                    "max_depth_reached": 8,
+                    "incomplete": False,
+                    "reasons": ["visit_limit", "https://example.invalid/leak"],
+                },
+                "frames": {
+                    "items": [
+                        {
+                            "category": "https://mms.pinduoduo.com/login/?token=raw",
+                            "reason": "https://evil.example/path",
+                            "entered": True,
+                            "nesting": 1,
+                            "src": "https://mms.pinduoduo.com/chat-merchant/index.html?buyer=1",
+                        }
+                    ]
+                },
+                "message_region": {
+                    "reached": False,
+                    "landmarks": [],
+                    "conversation_list_landmarks": ["chat-list-box", "买家张三"],
+                },
+            }
+        )
+        report = export_rendered_dom(page)
+        rendered = json.dumps(report, ensure_ascii=False)
+        self.assertNotIn("http", rendered)
+        self.assertNotIn("token", rendered)
+        self.assertNotIn("张三", rendered)
+        self.assertNotIn("buyer", rendered)
+        self.assertTrue(report["truncated"])
+        self.assertTrue(report["coverage"]["incomplete"])
+        self.assertEqual(report["coverage"]["reasons"], ["visit_limit"])
+        self.assertEqual(report["coverage"]["top_page"], "off_scope")
+        self.assertEqual(report["frames"]["items"][0]["category"], "off_scope")
+        self.assertFalse(report["frames"]["items"][0]["entered"])
+        self.assertFalse(report["message_region"]["reached"])
+        self.assertEqual(report["message_region"]["conversation_list_landmarks"], ["chat-list-box"])
+        self.assertFalse(report["message_region"]["conversation_list_counted_as_messages"])
+        self.assertEqual(report["status"], "coverage_incomplete")
+        self.assertFalse(report["platform_unsupported"])
+        self.assertFalse(report["production_mapping_validated"])
+
     def test_command_does_not_launch_a_browser_when_nobody_is_listening(self) -> None:
         from unittest import mock
 

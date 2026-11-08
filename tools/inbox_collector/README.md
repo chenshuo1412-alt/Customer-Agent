@@ -48,7 +48,11 @@ python -m inbox_collector login-prep --config config.login-prep.example.json
 
 Profile 里会留下登录态，只放在本机，不要复制、同步或提交。程序不读取 Cookie 文件。
 
-当前已经打开的专用 Chrome 不要为了新代码重启。`diagnose-dom` 不会另开浏览器，也不会附着你原来的 Chrome。它只请求**正在运行的新版** `login-prep` 对当前页做一次采样。导出的是标签名、属性名、安全 class 结构，以及值的脱敏分类：重复行 id 在这一屏是否唯一、是不是外壳常用名、`msgtimeformate` 是格式说明还是像日期时间、`title` / `aria-label` 是否恰好为买家、商家、已回复、未回复。原始 id、正文、身份、日期原文和 URL 不会写出。`data-v-*` 和 `tabindex` 只记为不稳定，不会当成选择器。
+当前已经打开的专用 Chrome 不要为了新代码重启。`diagnose-dom` 不会另开浏览器，也不会附着你原来的 Chrome。它只请求**正在运行的新版** `login-prep` 对当前页做一次采样。旧版只从 `body` 往下走 8 层、最多导出 300 个节点，并且不进入 iframe 和 shadow。节点没到 300 时 `truncated` 仍是 false，所以深度被截断也会看起来像“已经看完”。会话列表因此会被误当成消息区。
+
+新版仍只读当前页。它会进入已经渲染、且能确认属于客服页的同源 frame（正式页只限 `mms.pinduoduo.com/chat-merchant` 及其同源客服 frame；本地测试只限 `127.0.0.1` / `localhost`）。读不到的 frame、登录/密码 frame、支付 frame，以及不能确认是客服区域的 frame，只记跳过原因，不绕过浏览器限制。open shadow 会进入。closed shadow 读不到，结果里会标明这个限制，但不会把它说成“页面没有消息”。已知的消息区 class（`content-box`、`reply-box`、`chat-item`）和会话列表 class 分开记录。`loadMoreMsg` 单独出现不算消息区。浅层列表不会被当成消息。
+
+导出的仍是标签名、属性名、安全 class、frame 计数和来源分类、覆盖范围、真实截断原因，以及原来的值形状分类。原始 id、正文、身份、日期原文和 URL 不会写出。生产 mapping 仍是 false。
 
 一次采样不能证明 id 换消息后仍稳定，所以 `can_use_for_dedupe` 保持 false。格式说明不会被当成时间；形状像时间也只记为需要人工确认含义，`can_treat_time_as_message_time` 保持 false。其它文字只记为 `other_redacted`。隐藏行、重复 id、或 `aria-rowcount` 大于当前渲染行数时，证据记为不充分。结果里的 `human_checks` 是最低必要的人工核对，不是采集成功。生产 mapping 仍是 false。
 
@@ -61,7 +65,7 @@ python -m inbox_collector diagnose-dom --data-dir data --timeout-seconds 2
 这次代码不会替你执行这条命令去碰已经登录的窗口。先在本机用测试看结构导出：
 
 ```bash
-python -m unittest tests.test_dom_diagnose tests.test_browser_e2e.BrowserE2ETest.test_value_shapes_are_classified_without_raw_values tests.test_browser_e2e.BrowserE2ETest.test_diagnose_uses_the_open_page_without_navigation -b
+python -m unittest tests.test_dom_diagnose tests.test_browser_e2e.BrowserE2ETest.test_value_shapes_are_classified_without_raw_values tests.test_browser_e2e.BrowserE2ETest.test_message_region_coverage_is_not_the_shallow_list tests.test_browser_e2e.BrowserE2ETest.test_diagnose_uses_the_open_page_without_navigation -b
 ```
 
 采集仍然要等真实 DOM 核对之后。在那之前：
