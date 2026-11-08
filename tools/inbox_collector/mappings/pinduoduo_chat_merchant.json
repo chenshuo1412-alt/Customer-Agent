@@ -1,0 +1,19 @@
+{
+  "mapping_id": "pinduoduo.chat-merchant",
+  "validated": false,
+  "validation_status": "unverified_no_dom",
+  "list_fields_sufficient": false,
+  "entry_url": "https://mms.pinduoduo.com/chat-merchant/index.html#/",
+  "selectors": {},
+  "do_not_use_as_unread": ["待办任务", "红点", "未读角标", "预览摘要"],
+  "notes": [
+    "2026-11-08 的只读快照只看到分组文案「已回复」「已被自动回复」、分钟级时间和截断预览，以及「1个对话待复核」。没有 DOM、CSS selector、稳定会话 key 或 message id，也没有可当未读计数的字段。",
+    "「待办任务 0」不是未读数，不能用来触发。",
+    "同一分钟、同一段预览可能对应多条消息。没有稳定 message id 时必须停止，不能靠预览去重。",
+    "本文件不是可用选择器。validated 为 false 时实店模式必须停止并告警。",
+    "禁止把 fixtures 里 generic-inbox 的 data-* 属性套到真实商家页面。",
+    "2026-11-08 diagnose-dom 看到 class 名 chat-list-box、chatWindowHeader，以及属性名 id、title、href、aria-label、msgtimeformate、threeminutesthreshold、data-clipboard-text。这些只是结构证据，不是选择器。缺少 data-message-id 不表示真实页面不可识别。随后的值特征诊断也只输出脱敏分类和数量；即使某一屏 id 唯一或时间形状可解析，在人工确认含义之前仍不能把 validated 改成 true。",
+    "同一次 292 节点诊断的 max_depth 是 8，并看到 2 个 iframe，但没有 content-box、reply-box、li.chat-item。这是旧诊断的覆盖缺口：深度 8、不进入 iframe、不进入 shadow，而且节点数不到 300 时 truncated 仍为 false。不能据此说客服页没有消息区。validated 仍然是 false。",
+    "后续实页看到 content-box 里的 li.onemsg 才是消息行，li.chat-item 仍是会话列表。merchantMessage 包住全部可见行时不能从类名判断方向，isread 不能当成已回复。本地 Ollama qwen-kefu:latest 只说明生成接口可用，不是客服质量验证，也不是买家发送。validated 仍然是 false。"
+  ]
+}
