@@ -634,30 +634,27 @@ _EXPORT_JS = """
       can_use_for_dedupe: false
     };
   };
-  const controlLabelKind = (el) => {
-    const parts = [];
-    const inline = new Set(["span", "i", "em", "b", "strong", "small"]);
-    const walk = (node, root) => {
-      if (!node) return;
-      if (node.nodeType === 3) {
-        const text = String(node.nodeValue || "").replace(/\\s+/g, "");
-        if (text) parts.push(text);
-        return;
-      }
-      if (node.nodeType !== 1) return;
-      const tag = String(node.tagName || "").toLowerCase();
-      if (node !== root && !inline.has(tag)) return;
-      for (const child of Array.from(node.childNodes || [])) walk(child, root);
-    };
-    walk(el, el);
-    if (!parts.length) return "empty";
-    const allow = (text) => text === "发送" || text.toLowerCase() === "send";
-    if (parts.some(allow)) return "send";
-    const compact = parts.join("");
-    const stripped = compact.replace(/(?:[(（])?(?:enter|ctrl\\+enter)(?:[)）])?$/i, "");
-    if (allow(stripped)) return "send";
-    return "other_redacted";
+  const labelShape = (el) => {
+    if (el && el.querySelector && el.querySelector("textarea, input, button")) {
+      return { kind: "not_a_leaf_control", collected: true, contains_send_word: false, contains_enter_hint: false };
+    }
+    let raw = "";
+    try { raw = el && el.innerText != null ? String(el.innerText) : ""; } catch (e) { raw = ""; }
+    if (!raw) {
+      try { raw = el && el.textContent != null ? String(el.textContent) : ""; } catch (e2) { raw = ""; }
+    }
+    const compact = raw.replace(/\\s+/g, "");
+    if (!compact) return { kind: "empty", collected: true, contains_send_word: false, contains_enter_hint: false };
+    const lower = compact.toLowerCase();
+    const containsSend = compact.indexOf("发送") >= 0 || lower.indexOf("send") >= 0;
+    const containsEnter = lower.indexOf("enter") >= 0;
+    const shortcut = /^(?:发送|send)(?:[(（]?(?:enter|ctrl\\+enter|meta\\+enter)[)）]?)?$/i;
+    if (compact === "发送" || lower === "send") return { kind: "send", collected: true, contains_send_word: true, contains_enter_hint: false };
+    if (shortcut.test(compact)) return { kind: "send_with_shortcut", collected: true, contains_send_word: true, contains_enter_hint: containsEnter };
+    if (containsSend) return { kind: "contains_send_word", collected: true, contains_send_word: true, contains_enter_hint: containsEnter };
+    return { kind: "other_redacted", collected: true, contains_send_word: false, contains_enter_hint: containsEnter };
   };
+  const controlLabelKind = (el) => labelShape(el).kind;
   const controlRecord = (el) => {
     const attrs = [];
     for (const attr of Array.from(el.attributes || [])) {
@@ -665,6 +662,7 @@ _EXPORT_JS = """
       if (name === "tabindex" || name.indexOf("data-v-") === 0 || name === "value" || name === "placeholder") continue;
       if (/^[A-Za-z_:][A-Za-z0-9_:-]{0,40}$/.test(name) && attrs.indexOf(name) < 0 && attrs.length < 8) attrs.push(name);
     }
+    const shape = labelShape(el);
     return {
       tag: String(el.tagName || "").toLowerCase(),
       classes: classesOf(el).slice(0, 4),
@@ -673,13 +671,52 @@ _EXPORT_JS = """
       hidden: isHidden(el),
       in_message_region: regionOf(el) === "message_container",
       attr_names: attrs,
-      label_kind: controlLabelKind(el)
+      label_kind: shape.kind,
+      label_collected: shape.collected,
+      contains_send_word: shape.contains_send_word,
+      contains_enter_hint: shape.contains_enter_hint
+    };
+  };
+  const ancestorChain = (el) => {
+    const chain = [];
+    let cur = el;
+    let guard = 0;
+    while (cur && guard < 12) {
+      chain.push(cur);
+      cur = cur.parentElement;
+      guard += 1;
+    }
+    return chain;
+  };
+  const relateToInput = (button, input) => {
+    if (!input) return { relation: "input_not_collected", button_depth: null, input_depth: null, common_classes: [] };
+    const buttons = ancestorChain(button);
+    const inputs = ancestorChain(input);
+    let common = null;
+    let buttonDepth = 0;
+    for (const node of buttons) {
+      if (inputs.indexOf(node) >= 0) { common = node; break; }
+      buttonDepth += 1;
+    }
+    if (!common) return { relation: "no_common_container", button_depth: null, input_depth: null, common_classes: [] };
+    const inputDepth = inputs.indexOf(common);
+    let relation = "shares_container";
+    if (buttonDepth === 1 && inputDepth === 1) relation = "same_parent_as_input";
+    else if (buttonDepth === 0) relation = "ancestor_of_input";
+    else if (inputDepth === 0) relation = "descendant_of_input";
+    return {
+      relation,
+      button_depth: buttonDepth,
+      input_depth: inputDepth,
+      common_classes: classesOf(common).slice(0, 3)
     };
   };
   const composerProbe = () => {
     const textareas = [];
     const visibleButtons = [];
+    const visibleButtonEls = [];
     const nearInput = [];
+    let visibleButtonTotal = 0;
     let passwordSkipped = 0;
     let editables = 0;
     let hiddenButtons = 0;
@@ -713,8 +750,12 @@ _EXPORT_JS = """
           if (!record.hidden) anchors.push(el);
         } else if (record.hidden) {
           hiddenButtons += 1;
-        } else if (visibleButtons.length < 12) {
-          visibleButtons.push(record);
+        } else {
+          visibleButtonTotal += 1;
+          if (visibleButtons.length < 12) {
+            visibleButtons.push(record);
+            visibleButtonEls.push(el);
+          }
         }
       }
       let items = [];
@@ -748,6 +789,15 @@ _EXPORT_JS = """
         }
       });
     }
+    const anchor = anchors.find((el) => regionOf(el) === "message_container" && !isHidden(el)) || anchors[0] || null;
+    visibleButtons.forEach((record, index) => {
+      const rel = relateToInput(visibleButtonEls[index], anchor);
+      record.relation = rel.relation;
+      record.button_depth = rel.button_depth;
+      record.input_depth = rel.input_depth;
+      record.common_classes = rel.common_classes;
+      record.collected = true;
+    });
     const tokenCounts = new Map();
     for (const tokens of visibleRows) {
       for (const token of new Set(tokens)) tokenCounts.set(token, (tokenCounts.get(token) || 0) + 1);
@@ -762,6 +812,8 @@ _EXPORT_JS = """
       textareas,
       buttons: visibleButtons,
       hidden_button_count: hiddenButtons,
+      visible_button_count: visibleButtonTotal,
+      visible_buttons_not_described: Math.max(0, visibleButtonTotal - visibleButtons.length),
       near_input: nearInput,
       editables,
       password_skipped: passwordSkipped,
@@ -819,8 +871,28 @@ _EXPORT_JS = """
       time_present: !!timeEl,
       direction_source: "operator_declared_test_phrase"
     };
-    const inputs = (composerProbe().textareas || []).filter((item) => !item.hidden && item.in_message_region);
-    const senders = (composerProbe().near_input || []).filter((item) => item.label_kind === "send" && !item.hidden);
+    const following = index >= 0 ? visible[index + 1] : null;
+    if (following) {
+      const followMerchant = classWithinRow(following, "merchantMessage");
+      const followBuyer = classWithinRow(following, "buyer-item");
+      result.following_row = {
+        collected: true,
+        tag: String(following.tagName || "").toLowerCase(),
+        classes: classesOf(following).slice(0, 4),
+        hidden: false,
+        role: classesOf(following).indexOf("onemsg") >= 0 ? "onemsg" : "other",
+        merchant_message: followMerchant ? "present" : "absent",
+        buyer_item: followBuyer ? "present" : "absent",
+        message_time: classWithinRow(following, "message-time") ? "present" : "absent",
+        read_mark: classWithinRow(following, "isread") ? "present" : "absent"
+      };
+    } else {
+      result.following_row = { collected: false };
+    }
+    const probe = composerProbe();
+    const inputs = (probe.textareas || []).filter((item) => !item.hidden && item.in_message_region);
+    const allowHit = (item) => item && !item.hidden && (item.label_kind === "send" || item.label_kind === "send_with_shortcut");
+    const senders = (probe.near_input || []).filter(allowHit);
     result.input_in_message_region = inputs.length;
     result.send_label_near_input = senders.length;
     result.controls_verified_for_test = inputs.length === 1 && senders.length === 1 && index >= 0 && result.row.later_visible_rows === 0;
@@ -1186,6 +1258,11 @@ def _clean_controls(raw: Any, cap: int) -> list[dict[str, Any]]:
         label = item.get("label_kind")
         relation = item.get("relation")
         tag = item.get("tag")
+        common = [
+            token
+            for token in item.get("common_classes") or []
+            if isinstance(token, str) and _SAFE_CLASS.fullmatch(token)
+        ]
         cleaned.append(
             {
                 "tag": tag if tag in {"textarea", "input", "button", "div", "span", "a", "i", "em", "svg", "li", "p"} else "other",
@@ -1195,8 +1272,28 @@ def _clean_controls(raw: Any, cap: int) -> list[dict[str, Any]]:
                 "hidden": item.get("hidden") is True,
                 "in_message_region": item.get("in_message_region") is True,
                 "attr_names": names[:8],
-                "label_kind": label if label in {"send", "empty", "other_redacted"} else "other_redacted",
-                "relation": relation if relation in {"same_parent_as_input", "within_input_grandparent"} else None,
+                "label_kind": label
+                if label in {"send", "send_with_shortcut", "contains_send_word", "empty", "other_redacted", "not_a_leaf_control"}
+                else "other_redacted",
+                "label_collected": item.get("label_collected") is not False,
+                "contains_send_word": item.get("contains_send_word") is True,
+                "contains_enter_hint": item.get("contains_enter_hint") is True,
+                "relation": relation
+                if relation
+                in {
+                    "same_parent_as_input",
+                    "within_input_grandparent",
+                    "shares_container",
+                    "ancestor_of_input",
+                    "descendant_of_input",
+                    "no_common_container",
+                    "input_not_collected",
+                }
+                else None,
+                "button_depth": _clean_int(item.get("button_depth")) if item.get("button_depth") is not None else None,
+                "input_depth": _clean_int(item.get("input_depth")) if item.get("input_depth") is not None else None,
+                "common_classes": common[:3],
+                "collected": item.get("collected") is not False,
             }
         )
     return cleaned
@@ -1210,12 +1307,11 @@ def _page_acceptance(preflight: dict[str, Any], raw_probe: Any) -> dict[str, Any
     usable_inputs = [
         item for item in textareas if not item["hidden"] and not item["disabled"] and not item["read_only"]
     ]
-    send_buttons = [
-        item for item in buttons if item["label_kind"] == "send" and not item["hidden"] and not item["disabled"]
-    ]
-    allowlist_hits = [
-        item for item in [*buttons, *near_input] if item["label_kind"] == "send" and not item["hidden"] and not item["disabled"]
-    ]
+    def _allow_label(item: dict[str, Any]) -> bool:
+        return item["label_kind"] in {"send", "send_with_shortcut"} and not item["hidden"] and not item["disabled"]
+
+    send_buttons = [item for item in buttons if _allow_label(item)]
+    allowlist_hits = [item for item in [*buttons, *near_input] if _allow_label(item)]
     selected = _clean_int(probe.get("aria_selected_true"))
     current = _clean_int(probe.get("aria_current_true"))
     unique = [
@@ -1277,6 +1373,8 @@ def _page_acceptance(preflight: dict[str, Any], raw_probe: Any) -> dict[str, Any
         "send_label_button_count": len(send_buttons),
         "allowlist_send_label_hits": len(allowlist_hits),
         "hidden_button_count": _clean_int(probe.get("hidden_button_count")),
+        "visible_button_count": _clean_int(probe.get("visible_button_count")),
+        "visible_buttons_not_described": _clean_int(probe.get("visible_buttons_not_described")),
         "custom_visible_near_input_count": len(near_input),
         "send_control_absence_not_concluded": True,
         "contenteditable_count": _clean_int(probe.get("editables")),
@@ -1287,6 +1385,27 @@ def _page_acceptance(preflight: dict[str, Any], raw_probe: Any) -> dict[str, Any
         "human_checks": checks,
         "production_send_allowed": False,
         "production_mapping_validated": False,
+    }
+
+
+def _clean_following(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict) or raw.get("collected") is not True:
+        return {"collected": False}
+    classes = [token for token in raw.get("classes") or [] if isinstance(token, str) and _SAFE_CLASS.fullmatch(token)]
+    merchant = raw.get("merchant_message")
+    buyer = raw.get("buyer_item")
+    timing = raw.get("message_time")
+    tag = raw.get("tag")
+    return {
+        "collected": True,
+        "tag": tag if tag in {"li", "div", "p", "span"} else "other",
+        "classes": classes[:4],
+        "hidden": raw.get("hidden") is True,
+        "role": raw.get("role") if raw.get("role") in {"onemsg", "other", "list_item"} else "other",
+        "merchant_message": merchant if merchant in {"present", "absent"} else "absent",
+        "buyer_item": buyer if buyer in {"present", "absent"} else "absent",
+        "message_time": timing if timing in {"present", "absent"} else "absent",
+        "read_mark": "present" if raw.get("read_mark") == "present" else "absent",
     }
 
 
@@ -1315,6 +1434,7 @@ def _clean_phrase_probe(raw: Any) -> dict[str, Any]:
             "time_present": row.get("time_present") is True,
             "direction_source": "operator_declared_test_phrase" if raw.get("unique") is True else "not_applied",
         },
+        "following_row": _clean_following(raw.get("following_row")),
         "input_in_message_region": _clean_int(raw.get("input_in_message_region")),
         "send_label_near_input": _clean_int(raw.get("send_label_near_input")),
         "controls_verified_for_test": raw.get("controls_verified_for_test") is True,

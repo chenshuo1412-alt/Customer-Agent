@@ -1224,6 +1224,57 @@ class BrowserE2ETest(unittest.TestCase):
         )
         self.assertEqual(duplicate["status"], "probe_not_unique")
 
+    def test_nested_send_control_is_described_without_weakening_the_gate(self) -> None:
+        from inbox_collector.browser_session import DedicatedBrowser
+        from inbox_collector.dom_diagnose import export_rendered_dom
+
+        phrase = "客服测试2006"
+        self.html_path.write_text(
+            "<!DOCTYPE html><body><div class='content-box'>"
+            f"<li class='onemsg'><div class='merchantMessage'><div class='buyer-item'><p class='msg-content-box'>{phrase}</p></div></div></li>"
+            "<li class='onemsg later-note'><div class='merchantMessage'><p class='msg-content-box'>后面这条不能导出</p></div></li>"
+            "<div class='chat-footer'>"
+            "<div class='textarea-rect'><textarea class='reply-editor'></textarea></div>"
+            "<div class='send-wrap'><button class='el-button el-button--primary el-button--mini' type='button'>"
+            "<div><span>发送</span></div><div>(Enter)</div></button></div></div></div></body></html>",
+            encoding="utf-8",
+        )
+        browser = DedicatedBrowser(self.data / "nested-send-profile")
+        browser.start()
+        self.addCleanup(browser.close)
+        browser.page.goto(f"http://127.0.0.1:{self.port}/inbox.html")
+        report = export_rendered_dom(browser.page, timeout_seconds=5, probe_phrase=phrase)
+        rendered = json.dumps(report, ensure_ascii=False)
+        self.assertNotIn(phrase, rendered)
+        self.assertNotIn("后面这条不能导出", rendered)
+        probe = report["phrase_probe"]
+        self.assertTrue(probe["unique"])
+        self.assertEqual(probe["row"]["later_visible_rows"], 1)
+        self.assertFalse(probe["controls_verified_for_test"])
+        self.assertFalse(probe["production_send_allowed"])
+        following = probe["following_row"]
+        self.assertTrue(following["collected"])
+        self.assertEqual(following["role"], "onemsg")
+        self.assertIn("later-note", following["classes"])
+        self.assertNotIn("后面这条不能导出", json.dumps(following, ensure_ascii=False))
+        buttons = [
+            item
+            for item in report["page_acceptance"]["buttons"]
+            if "el-button--primary" in item["classes"]
+        ]
+        self.assertEqual(len(buttons), 1)
+        button = buttons[0]
+        self.assertEqual(button["label_kind"], "send_with_shortcut")
+        self.assertTrue(button["label_collected"])
+        self.assertTrue(button["contains_send_word"])
+        self.assertTrue(button["contains_enter_hint"])
+        self.assertEqual(button["relation"], "shares_container")
+        self.assertGreater(button["button_depth"], 1)
+        self.assertGreater(button["input_depth"], 1)
+        self.assertIn("chat-footer", button["common_classes"])
+        self.assertEqual(report["page_acceptance"]["visible_buttons_not_described"], 0)
+        self.assertFalse(report["production_mapping_validated"])
+
     def test_diagnose_uses_the_open_page_without_navigation(self) -> None:
         from inbox_collector.dom_diagnose import export_rendered_dom, service_diagnose_request
 
