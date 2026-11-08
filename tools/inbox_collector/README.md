@@ -94,7 +94,7 @@ python -m inbox_collector confirmed-text-send --data-dir data --challenge '客�
 python -m inbox_collector diagnose-dom --data-dir data --timeout-seconds 5 --op input-state-readonly --probe-phrase '客服配对1109-B8' --candidate-reply '新链路测试B8收到。'
 ```
 
-这条只读命令不读取、不改写现有授权文件，也不创建新的授权或 `confirmed-text.attempts/`。`--candidate-reply` 只在这个只读操作里有效，不能拿去打开发送。退出码 0 只表示 `status` 是 `input_state_ready`。同时看 `authorization_used`、`send_authorized`、`buyer_source_confirmed` 都是 false，`files_unchanged` 是 true，`production_send_allowed` 和 `delivery_claimed` 都是 false。`match_count` 为 1 才表示这句挑战在当前消息面板里恰好一条。`input_nonempty` 和 `input_equals_candidate` 只比较候选原文。`send_control_unique`、`send_control_visible`、`send_control_disabled` 和 `send_control_exact` 描述发送控件。`reply_exact_count`、`visible_captcha`、`visible_error` 是计数和布尔值。结果不包含其它客户原文，也不把旧授权里的句子当成这次候选。
+这条只读命令不读取、不改写现有授权文件，也不创建新的授权或 `confirmed-text.attempts/`。`--candidate-reply` 只在这个只读操作里有效，不能拿去打开发送。退出码 0 只表示 `status` 是 `input_state_ready`。同时看 `authorization_used`、`send_authorized`、`buyer_source_confirmed` 都是 false，`files_unchanged` 是 true，`production_send_allowed` 和 `delivery_claimed` 都是 false。`match_count` 为 1 才表示这句挑战在当前消息面板里恰好一条。`input_nonempty` 和 `input_equals_candidate` 只比较候选原文。`send_control_unique`、`send_control_visible`、`send_control_disabled` 和 `send_control_exact` 描述发送控件。`reply_exact_count`、`visible_captcha`、`visible_error` 是计数和布尔值。结果不包含其它客户原文，也不把旧授权里的句子当成这次候选。`reply_scan_truncated` 为 true 时 `status` 不是 `input_state_ready`，退出码 2。扫描只覆盖当前挑战所在消息面板里已经渲染的 `li.onemsg`，上限 200 行、8000 个节点；没加载进 DOM 的历史不会滚动去取，所以不能把未覆盖的 0 当成没有原文。
 
 只对这一句发送一次，不是全店托管：
 

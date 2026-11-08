@@ -72,25 +72,44 @@ _COMMON_JS = """
     }
     return norm(text);
   };
+  const ROW_CAP = 200;
+  const NODE_CAP = 8000;
   const replyHits = (box, replyNorm) => {
-    if (!box || !replyNorm) return { count: 0, truncated: false };
-    const nodes = Array.from(box.querySelectorAll("li.onemsg, .msg-content, .msg-content-box, div, span, p"));
-    const truncated = nodes.length > 80;
+    const blank = { count: 0, truncated: false, reason: null, rows_total: 0, rows_checked: 0, nodes_checked: 0, row_cap: ROW_CAP, node_cap: NODE_CAP, coverage_scope: "target_panel_rendered_onemsg" };
+    if (!box || !replyNorm) return blank;
+    const rows = Array.from(box.querySelectorAll("li.onemsg")).filter((row) => row.closest(".content-box") === box);
+    if (rows.length > ROW_CAP) {
+      return { count: 0, truncated: true, reason: "message_row_cap", rows_total: rows.length, rows_checked: 0, nodes_checked: 0, row_cap: ROW_CAP, node_cap: NODE_CAP, coverage_scope: "target_panel_rendered_onemsg" };
+    }
+    let nodes = 0;
     let count = 0;
-    for (const node of nodes.slice(0, 80)) {
-      if (hidden(node)) continue;
-      if (node.closest && node.closest("textarea, input, button")) continue;
-      if (node.querySelector && node.querySelector("textarea, input, button")) continue;
-      if (norm(node.textContent) !== replyNorm) continue;
+    let checked = 0;
+    const exact = (node) => {
+      if (!node || node.nodeType !== 1) return false;
+      if (node.closest && (node.closest("textarea") || node.closest("input") || node.closest("button"))) return false;
+      if (norm(node.textContent) !== replyNorm) return false;
       let parent = node.parentElement;
-      let covered = false;
       while (parent && parent !== box) {
-        if (!hidden(parent) && norm(parent.textContent) === replyNorm) { covered = true; break; }
+        if (norm(parent.textContent) === replyNorm) return false;
         parent = parent.parentElement;
       }
-      if (!covered) count += 1;
+      return true;
+    };
+    for (const row of rows) {
+      const stack = [row];
+      while (stack.length) {
+        const node = stack.pop();
+        nodes += 1;
+        if (nodes > NODE_CAP) {
+          return { count, truncated: true, reason: "message_node_cap", rows_total: rows.length, rows_checked: checked, nodes_checked: nodes, row_cap: ROW_CAP, node_cap: NODE_CAP, coverage_scope: "target_panel_rendered_onemsg" };
+        }
+        if (exact(node)) count += 1;
+        const children = node.children ? Array.from(node.children) : [];
+        for (let index = children.length - 1; index >= 0; index -= 1) stack.push(children[index]);
+      }
+      checked += 1;
     }
-    return { count, truncated };
+    return { count, truncated: false, reason: null, rows_total: rows.length, rows_checked: checked, nodes_checked: nodes, row_cap: ROW_CAP, node_cap: NODE_CAP, coverage_scope: "target_panel_rendered_onemsg" };
   };
   const replyCount = (box, replyNorm) => replyHits(box, replyNorm).count;
   const safeTokens = (el) => String(el && el.getAttribute && el.getAttribute("class") || "").split(/\\s+/).filter((token) => token !== "active" && /^[A-Za-z_][A-Za-z0-9_-]{0,48}$/.test(token)).sort().slice(0, 6);
@@ -172,7 +191,12 @@ _READ_JS = (
   if (!located.row || !located.box) return base;
   base.input_count = located.inputs.length;
   base.sender_count = located.senders.length;
-  base.reply_visible_count = replyCount(located.box, replyNorm);
+  const readHits = replyHits(located.box, replyNorm);
+  base.reply_visible_count = readHits.count;
+  base.reply_scan_truncated = readHits.truncated;
+  base.reply_scan_reason = readHits.reason;
+  base.reply_rows_total = readHits.rows_total;
+  base.reply_rows_checked = readHits.rows_checked;
   base.panel_fingerprint = [part(located.box), part(located.row), part(located.composer)].join("|");
   base.row_id_raw = usableId(located.row.getAttribute && located.row.getAttribute("id"));
   if (located.field) base.input_empty = String(located.field.value || "") === "";
@@ -239,6 +263,13 @@ _OBSERVE_JS = (
     flag_classes: flags.slice(0, 4),
     reply_exact_count: hits.count,
     reply_scan_truncated: hits.truncated,
+    reply_scan_reason: hits.reason,
+    reply_rows_total: hits.rows_total,
+    reply_rows_checked: hits.rows_checked,
+    reply_nodes_checked: hits.nodes_checked,
+    reply_row_cap: hits.row_cap,
+    reply_node_cap: hits.node_cap,
+    coverage_scope: hits.coverage_scope,
     panel_fingerprint: located.row && located.box ? [part(located.box), part(located.row), part(located.composer)].join("|") : "",
     row_id_raw: located.row ? usableId(located.row.getAttribute && located.row.getAttribute("id")) : "",
     values_included: false
@@ -261,7 +292,9 @@ _HANDLES_JS = (
   if (!located.inputs || located.inputs.length !== 1) return fail("input_not_verified");
   if (String(located.field.value || "") !== "") return fail("draft_present");
   if (located.senders.length !== 1) return fail("send_control_not_verified");
-  if (replyCount(located.box, norm(arg && arg.reply)) !== 0) return fail("reply_already_visible");
+  const handleHits = replyHits(located.box, norm(arg && arg.reply));
+  if (handleHits.truncated && handleHits.count === 0) return fail("reply_scan_incomplete");
+  if (handleHits.count !== 0) return fail("reply_already_visible");
   return { ok: true, status: "ready", field: located.field, sender: located.senders[0] };
 }
 """
@@ -566,6 +599,8 @@ def _observe_block(raw: dict[str, Any]) -> str | None:
         return "challenge_absent"
     if count != 1:
         return "challenge_not_unique"
+    if raw.get("reply_scan_truncated") is True and int(raw.get("reply_exact_count") or 0) == 0:
+        return "reply_scan_incomplete"
     if int(raw.get("reply_exact_count") or 0) != 0:
         return "reply_already_visible"
     if int(raw.get("input_count") or 0) != 1 or raw.get("input_nonempty") is not False:
@@ -588,6 +623,8 @@ def _read_gate(raw: dict[str, Any]) -> str | None:
         return "challenge_absent"
     if count != 1:
         return "challenge_not_unique"
+    if raw.get("reply_scan_truncated") is True and int(raw.get("reply_visible_count") or 0) == 0:
+        return "reply_scan_incomplete"
     if int(raw.get("reply_visible_count") or 0) != 0:
         return "reply_already_visible"
     if int(raw.get("input_count") or 0) != 1 or raw.get("input_empty") is not True:
@@ -629,6 +666,14 @@ def _clean_state(raw: Any, *, before: int | None = None) -> dict[str, Any]:
         "reply_appeared": appeared,
         "reply_age": "increased_after_action" if appeared is True else "unchanged_this_action" if appeared is False else "unproven_single_snapshot",
         "reply_scan_truncated": source.get("reply_scan_truncated") is True,
+        "reply_scan_reason": source.get("reply_scan_reason") if source.get("reply_scan_reason") in {"message_row_cap", "message_node_cap"} else None,
+        "reply_rows_total": int(source.get("reply_rows_total") or 0),
+        "reply_rows_checked": int(source.get("reply_rows_checked") or 0),
+        "reply_nodes_checked": int(source.get("reply_nodes_checked") or 0),
+        "reply_row_cap": int(source.get("reply_row_cap") or 200),
+        "reply_node_cap": int(source.get("reply_node_cap") or 8000),
+        "coverage_scope": "target_panel_rendered_onemsg",
+        "history_beyond_dom": "not_scrolled",
         "values_included": False,
     }
 
@@ -701,7 +746,18 @@ def run_input_state(
         report["files_unchanged"] = _files_unchanged(data_dir, auth_before, ledger_before, attempts_before)
         return report
     state = _clean_state(raw)
-    status = "input_state_ready" if int(raw.get("match_count") or 0) == 1 else "challenge_absent" if int(raw.get("match_count") or 0) == 0 else "challenge_not_unique"
+    match = int(raw.get("match_count") or 0)
+    found = int(raw.get("reply_exact_count") or 0)
+    if match == 0:
+        status = "challenge_absent"
+    elif match != 1:
+        status = "challenge_not_unique"
+    elif raw.get("reply_scan_truncated") is True and found == 0:
+        status = "reply_scan_incomplete"
+    elif found:
+        status = "reply_already_visible"
+    else:
+        status = "input_state_ready"
     sender = state.get("sender") if isinstance(state.get("sender"), dict) else None
     report = _report(
         status,
@@ -718,6 +774,15 @@ def run_input_state(
         send_control_disabled=bool(sender and sender.get("disabled") is True),
         send_control_exact=bool(sender and sender.get("label_kind") in {"send", "send_with_shortcut"}),
         reply_exact_count=state["reply_exact_count"],
+        reply_scan_truncated=state["reply_scan_truncated"],
+        reply_scan_reason=state["reply_scan_reason"],
+        reply_rows_total=state["reply_rows_total"],
+        reply_rows_checked=state["reply_rows_checked"],
+        reply_nodes_checked=state["reply_nodes_checked"],
+        reply_row_cap=state["reply_row_cap"],
+        reply_node_cap=state["reply_node_cap"],
+        coverage_scope=state["coverage_scope"],
+        history_beyond_dom=state["history_beyond_dom"],
         visible_captcha=state["visible_captcha"],
         visible_error=state["visible_error"],
         window_matches=None if explicit or auth is None else auth.get("window_id") == window_id,
@@ -818,7 +883,7 @@ def run_confirmed_text(
     if recheck.get("panel_fingerprint") != raw.get("panel_fingerprint") or str(recheck.get("row_id_raw") or "") != str(raw.get("row_id_raw") or ""):
         _mark_attempt(data_dir, challenge, reply, "revoked")
         return _with_legacy(data_dir, legacy_before, _leak_guard(_report("panel_changed", ledger_sealed=True, input_state=_clean_state(recheck, before=int(recheck.get("reply_exact_count") or 0)), **context), challenge, reply))
-    pre_gate = _read_gate({**raw, "input_empty": recheck.get("input_nonempty") is False, "input_count": recheck.get("input_count"), "sender_count": recheck.get("sender_count"), "reply_visible_count": recheck.get("reply_exact_count"), "panel_fingerprint": recheck.get("panel_fingerprint")})
+    pre_gate = _read_gate({**raw, "input_empty": recheck.get("input_nonempty") is False, "input_count": recheck.get("input_count"), "sender_count": recheck.get("sender_count"), "reply_visible_count": recheck.get("reply_exact_count"), "reply_scan_truncated": recheck.get("reply_scan_truncated"), "panel_fingerprint": recheck.get("panel_fingerprint")})
     if pre_gate:
         _mark_attempt(data_dir, challenge, reply, "revoked")
         return _with_legacy(data_dir, legacy_before, _leak_guard(_report(pre_gate, ledger_sealed=True, input_state=_clean_state(recheck), **context), challenge, reply))
@@ -873,6 +938,8 @@ def run_confirmed_text(
         latest = accepted
         while True:
             latest = page.evaluate(_OBSERVE_JS, action_arg)
+            if isinstance(latest, dict) and latest.get("reply_scan_truncated") is True:
+                break
             if isinstance(latest, dict) and int(latest.get("reply_exact_count") or 0) > before_count:
                 break
             if time.monotonic() >= deadline:
@@ -899,7 +966,7 @@ def run_confirmed_text(
                 bundle.dispose()
             except Exception:
                 pass
-    appeared = isinstance(latest, dict) and int(latest.get("reply_exact_count") or 0) > before_count
+    appeared = isinstance(latest, dict) and latest.get("reply_scan_truncated") is not True and int(latest.get("reply_exact_count") or 0) > before_count
     state = _clean_state(latest if isinstance(latest, dict) else {}, before=before_count)
     if appeared and input_attempted and click_attempted:
         _mark_attempt(data_dir, challenge, reply, "page_visible")
@@ -925,7 +992,7 @@ def run_confirmed_text(
             reply,
         ))
     _mark_attempt(data_dir, challenge, reply, "uncertain")
-    retained = bool(state.get("input_equals_reply")) and not appeared
+    retained = bool(state.get("input_equals_reply")) and not appeared and state.get("reply_scan_truncated") is not True
     return _with_legacy(data_dir, legacy_before, _leak_guard(
         _report(
             "paused_uncertain",
@@ -940,7 +1007,7 @@ def run_confirmed_text(
             receipt="absent",
             ledger_sealed=True,
             input_state=state,
-            appearance="input_retained_receipt_absent" if retained else "receipt_absent",
+            appearance="reply_scan_incomplete" if state.get("reply_scan_truncated") else "input_retained_receipt_absent" if retained else "receipt_absent",
             receipt_wait_seconds=receipt_wait_seconds,
             **context,
         ),

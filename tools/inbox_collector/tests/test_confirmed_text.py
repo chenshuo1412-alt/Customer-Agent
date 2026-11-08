@@ -879,6 +879,91 @@ class ConfirmedTextTest(unittest.TestCase):
             )
             self.assertEqual(code, 2)
 
+    def test_reply_coverage_fails_closed_and_still_sees_a_late_duplicate(self) -> None:
+        from playwright.sync_api import sync_playwright
+
+        from inbox_collector.cli import diagnose_exit_code
+
+        self.assertEqual(diagnose_exit_code("input-state-readonly", {"status": "reply_scan_incomplete", "handler": "input-state-readonly"}), 2)
+
+        def page_html(target: str, other: str = "") -> str:
+            return (
+                "<!DOCTYPE html><html><body>"
+                f"{other}<div class='content-box target' style='width:640px'>{target}"
+                "<div class='reply-box'><textarea></textarea><button type='button'>发送</button></div></div>"
+                "</body></html>"
+            )
+
+        challenge = f"<li class='onemsg'><div class='msg-content'>{_NEW_CHALLENGE}</div></li>"
+        fillers = "".join(f"<div class='pad-{index}'><span>占位</span></div>" for index in range(90))
+        late = f"<li class='onemsg'><span>12:00</span><span class='bubble'>{_NEW_REPLY}</span></li>"
+        hidden = f"<li class='onemsg' style='display:none'><span>{_NEW_REPLY}</span></li>"
+        many = "".join(f"<li class='onemsg'><span>行{index}</span><i>注</i></li>" for index in range(40))
+        over = "".join("<li class='onemsg'><span>超</span></li>" for _ in range(201))
+        other = f"<div class='content-box other'><li class='onemsg'><div class='msg-content'>{_NEW_REPLY}</div></li></div>"
+        with TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            original = plant_legacy(data, _CHALLENGE, _REPLY)
+            write_authorization(data, challenge=_CHALLENGE, reply=_REPLY, window_id="ab" * 16, expires_at=time.time() + 60)
+            auth_before = (data / "confirmed-text.auth.json").read_bytes()
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(headless=True)
+                page = browser.new_page()
+
+                def look(inner: str, outside: str = "") -> dict:
+                    page.set_content(page_html(inner, outside))
+                    (data / "dom-diagnose.request").write_text(
+                        json.dumps(
+                            {"op": "input-state-readonly", "probe_phrase": _NEW_CHALLENGE, "candidate_reply": _NEW_REPLY},
+                            ensure_ascii=False,
+                        ),
+                        encoding="utf-8",
+                    )
+                    service_diagnose_request(page, data, window_id="zz" * 16)
+                    return json.loads((data / "dom-diagnose.result.json").read_text(encoding="utf-8"))
+
+                duplicate = look(challenge + fillers + late)
+                self.assertEqual(duplicate["status"], "reply_already_visible")
+                self.assertGreaterEqual(duplicate["reply_exact_count"], 1)
+                self.assertFalse(duplicate["reply_scan_truncated"])
+                self.assertEqual(duplicate["reply_rows_checked"], 2)
+                nested = look(challenge + "<li class='onemsg'><span>时间</span><span class='bubble'>" + _NEW_REPLY + "</span></li>")
+                self.assertEqual(nested["status"], "reply_already_visible")
+                concealed = look(challenge + hidden)
+                self.assertEqual(concealed["status"], "reply_already_visible")
+                isolated = look(challenge + many, other)
+                self.assertEqual(isolated["status"], "input_state_ready")
+                self.assertEqual(isolated["reply_exact_count"], 0)
+                self.assertFalse(isolated["reply_scan_truncated"])
+                self.assertEqual(isolated["reply_rows_checked"], isolated["reply_rows_total"])
+                self.assertGreater(isolated["reply_nodes_checked"], 80)
+                self.assertEqual(isolated["coverage_scope"], "target_panel_rendered_onemsg")
+                self.assertEqual(isolated["history_beyond_dom"], "not_scrolled")
+                capped = look(challenge + over)
+                self.assertEqual(capped["status"], "reply_scan_incomplete")
+                self.assertTrue(capped["reply_scan_truncated"])
+                self.assertEqual(capped["reply_scan_reason"], "message_row_cap")
+                self.assertEqual(capped["reply_rows_checked"], 0)
+                self.assertGreater(capped["reply_rows_total"], 200)
+                write_authorization(data, challenge=_NEW_CHALLENGE, reply=_NEW_REPLY, window_id="ab" * 16, expires_at=time.time() + 60)
+                refused = run_confirmed_text(page, data, _NEW_CHALLENGE, window_id="ab" * 16, receipt_wait_seconds=0.2)
+                self.assertEqual(refused["status"], "reply_scan_incomplete")
+                self.assertFalse(refused["input_attempted"])
+                self.assertFalse(refused["click_attempted"])
+                self.assertFalse((data / "confirmed-text.attempts").exists())
+                self.assertEqual((data / "confirmed-text.ledger.json").read_bytes(), original)
+                page.set_content(
+                    page_html(challenge + many).replace(
+                        "<button type='button'>发送</button>",
+                        "<button type='button' onclick=\"var box=this.closest('.content-box');var li=document.createElement('li');li.className='onemsg';var s=document.createElement('span');s.textContent=box.querySelector('textarea').value;li.appendChild(s);box.appendChild(li);\">发送</button>",
+                    )
+                )
+                sent = run_confirmed_text(page, data, _NEW_CHALLENGE, window_id="ab" * 16, receipt_wait_seconds=2)
+                self.assertEqual(sent["status"], "page_visible")
+                self.assertFalse(sent["input_state"]["reply_scan_truncated"])
+                self.assertFalse(sent["delivery_claimed"])
+                browser.close()
+
 
 if __name__ == "__main__":
     unittest.main()
