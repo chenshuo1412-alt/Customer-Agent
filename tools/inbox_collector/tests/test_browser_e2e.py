@@ -311,6 +311,143 @@ class BrowserE2ETest(unittest.TestCase):
         self.assertFalse(saved["restart_duplicate_inbound"])
         self.assertTrue(os.access(evidence_dir, os.W_OK))
 
+    def test_value_shapes_are_classified_without_raw_values(self) -> None:
+        from inbox_collector.dom_diagnose import export_rendered_dom
+        from inbox_collector.browser_session import DedicatedBrowser
+
+        pages = {
+            "shell-ids": (
+                "<div id='app'></div><div id='header'></div>"
+                "<div class='chat-list-box'><div class='row'></div><div class='row'></div></div>"
+            ),
+            "format-time": (
+                "<div class='chat-list-box'>"
+                "<div class='row' msgtimeformate='YYYY-MM-DD HH:mm:ss'></div>"
+                "<div class='row' msgtimeformate='HH:mm'></div></div>"
+            ),
+            "parsed-time": (
+                "<div class='chat-list-box'>"
+                "<div class='row' msgtimeformate='2026-11-08T13:32:44+08:00'></div>"
+                "<div class='row' msgtimeformate='2026-11-08 09:01:02'></div></div>"
+            ),
+            "labels": (
+                "<div class='chat-list-box'>"
+                "<div class='row' aria-label='买家' title='已回复'></div>"
+                "<div class='row' aria-label='商家' title='张三的订单'></div></div>"
+            ),
+            "roles-only": (
+                "<div class='chat-list-box'>"
+                "<div class='row' aria-label='买家'></div>"
+                "<div class='row' aria-label='商家'></div></div>"
+            ),
+            "virtual": (
+                "<div class='chat-list-box' aria-rowcount='40'>"
+                "<div class='row' id='same'></div><div class='row' id='same'></div>"
+                "<div class='row' id='hidden-one' hidden></div>"
+                "<div class='row' id='hidden-two' style='display:none'></div></div>"
+            ),
+            "unique-once": (
+                "<div class='list'>"
+                "<div class='row' id='aa100001'></div>"
+                "<div class='row' id='aa100002'></div></div>"
+            ),
+            "numeric-shell": (
+                "<div id='100000123' class='wrap'>"
+                "<div class='row'></div><div class='row'></div></div>"
+            ),
+            "duplicate-id": (
+                "<div class='chat-list-box'>"
+                "<div class='row' id='row-alpha'></div>"
+                "<div class='row' id='row-alpha'></div></div>"
+            ),
+            "clock": (
+                "<div class='chat-list-box'>"
+                "<div class='row' msgtimeformate='13:32'></div>"
+                "<div class='row' msgtimeformate='09:01:02'></div></div>"
+            ),
+            "unreadable-time": (
+                "<div class='chat-list-box'>"
+                "<div class='row' msgtimeformate='刚刚'></div>"
+                "<div class='row' msgtimeformate='soon'></div></div>"
+            ),
+            "mixed-time": (
+                "<div class='chat-list-box'>"
+                "<div class='row' msgtimeformate='YYYY-MM-DD HH:mm:ss'></div>"
+                "<div class='row' msgtimeformate='2026-11-08T13:32:44+08:00'></div></div>"
+            ),
+            "reply-only": (
+                "<div class='chat-list-box'>"
+                "<div class='row' title='已回复'></div>"
+                "<div class='row' title='未回复'></div></div>"
+            ),
+            "panel": "<div class='panel'><span class='title'>hello</span></div>",
+        }
+        browser = DedicatedBrowser(self.data / "value-profile")
+        browser.start()
+        self.addCleanup(browser.close)
+        self.html_path.write_text("<!DOCTYPE html><body><div class='ready'></div></body></html>", encoding="utf-8")
+        browser.page.goto(f"http://127.0.0.1:{self.port}/inbox.html")
+        pid = browser.pid
+        findings = {}
+        for name, inner in pages.items():
+            self.html_path.write_text(f"<!DOCTYPE html><body>{inner}</body></html>", encoding="utf-8")
+            before = f"http://127.0.0.1:{self.port}/inbox.html"
+            browser.page.goto(before)
+            report = export_rendered_dom(browser.page, timeout_seconds=2)
+            self.assertEqual(browser.pid, pid)
+            self.assertEqual(browser.page.url, before)
+            rendered = json.dumps(report, ensure_ascii=False)
+            for secret in (
+                '"app"',
+                '"header"',
+                "YYYY-MM-DD",
+                "HH:mm",
+                "2026-11-08",
+                "13:32:44",
+                "13:32",
+                "09:01",
+                "张三",
+                "刚刚",
+                "hello",
+                '"same"',
+                "hidden-one",
+                "hidden-two",
+                "aa100001",
+                "aa100002",
+                "100000123",
+                "row-alpha",
+                "token=",
+            ):
+                self.assertNotIn(secret, rendered, name)
+            self.assertFalse(report["value_assessment"]["can_use_for_dedupe"], name)
+            self.assertFalse(report["value_assessment"]["can_treat_time_as_message_time"], name)
+            self.assertFalse(report["production_mapping_validated"], name)
+            findings[name] = report["value_assessment"]
+        self.assertEqual(findings["shell-ids"]["id_evidence"], "not_on_repeated_rows")
+        self.assertGreater(findings["shell-ids"]["shell_ids"]["generic_shell"], 0)
+        self.assertEqual(findings["format-time"]["time_evidence"], "format_description_not_a_time")
+        self.assertEqual(findings["parsed-time"]["time_evidence"], "parseable_shape_needs_human_meaning_check")
+        self.assertEqual(findings["labels"]["role_evidence"], "non_allowlist_text_redacted")
+        self.assertEqual(findings["roles-only"]["role_evidence"], "exact_role_labels_on_sampled_rows")
+        self.assertFalse(findings["roles-only"]["can_treat_labels_as_reply_status"])
+        self.assertTrue(findings["virtual"]["virtual_list"])
+        self.assertGreaterEqual(findings["virtual"]["hidden_row_count"], 2)
+        self.assertEqual(findings["virtual"]["id_evidence"], "incomplete_virtual_list")
+        self.assertEqual(findings["virtual"]["groups"][0]["id"]["uniqueness"], "duplicated")
+        self.assertEqual(findings["unique-once"]["id_evidence"], "unique_in_this_snapshot")
+        self.assertEqual(findings["unique-once"]["id_stability"], "unproven_single_snapshot")
+        self.assertEqual(findings["numeric-shell"]["id_evidence"], "not_on_repeated_rows")
+        self.assertGreater(findings["numeric-shell"]["shell_ids"]["long_numeric"], 0)
+        self.assertEqual(findings["duplicate-id"]["id_evidence"], "duplicated")
+        self.assertEqual(findings["clock"]["time_evidence"], "clock_without_date")
+        self.assertEqual(findings["unreadable-time"]["time_evidence"], "unreadable_redacted")
+        self.assertEqual(findings["mixed-time"]["time_evidence"], "mixed_or_unreadable")
+        self.assertEqual(findings["reply-only"]["role_evidence"], "reply_labels_without_direction")
+        self.assertEqual(findings["panel"]["id_evidence"], "insufficient_no_repeated_rows")
+        self.assertTrue(findings["unique-once"]["human_checks"])
+        self.assertTrue(findings["parsed-time"]["human_checks"])
+        self.assertTrue(findings["labels"]["human_checks"])
+
     def test_diagnose_uses_the_open_page_without_navigation(self) -> None:
         from inbox_collector.dom_diagnose import export_rendered_dom, service_diagnose_request
 

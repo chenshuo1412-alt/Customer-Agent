@@ -198,6 +198,50 @@ class DomDiagnoseTest(unittest.TestCase):
         self.assertIsNone(report["nodes"])
         self.assertFalse(report["platform_unsupported"])
 
+    def test_raw_identifier_in_assessment_is_dropped(self) -> None:
+        page = FakePage(
+            {
+                "nodes": [
+                    {
+                        "tag": "div",
+                        "attributes": ["class"],
+                        "class_structure": ["chat-list-box"],
+                        "path": ["chat-list-box"],
+                        "depth": 1,
+                        "child_element_count": 2,
+                    }
+                ],
+                "value_assessment": {
+                    "groups": [
+                        {
+                            "tag": "div",
+                            "class_structure": ["chat-item"],
+                            "path": ["chat-list-box"],
+                            "rendered_count": 2,
+                            "visible_count": 2,
+                            "hidden_count": 0,
+                            "virtual_list": False,
+                            "id": {
+                                "present": 2,
+                                "distinct": 2,
+                                "duplicated": 0,
+                                "uniqueness": "msg-882211",
+                                "stability": "unproven_single_snapshot",
+                            },
+                            "time": {},
+                            "labels": {},
+                        }
+                    ],
+                    "shell_ids": {},
+                },
+            }
+        )
+        report = export_rendered_dom(page)
+        self.assertNotIn("msg-882211", json.dumps(report))
+        self.assertEqual(report["value_assessment"]["groups"][0]["id"]["uniqueness"], "insufficient")
+        self.assertFalse(report["value_assessment"]["can_use_for_dedupe"])
+        self.assertFalse(report["value_assessment"]["can_treat_time_as_message_time"])
+
     def test_command_does_not_launch_a_browser_when_nobody_is_listening(self) -> None:
         from unittest import mock
 

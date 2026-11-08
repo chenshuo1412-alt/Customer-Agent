@@ -48,7 +48,9 @@ python -m inbox_collector login-prep --config config.login-prep.example.json
 
 Profile 里会留下登录态，只放在本机，不要复制、同步或提交。程序不读取 Cookie 文件。
 
-当前已经打开的专用 Chrome 不要为了新代码重启。`diagnose-dom` 不会另开浏览器，也不会附着你原来的 Chrome。它只请求**正在运行的新版** `login-prep` 导出当前页的标签名、属性名和安全 class 结构。客户正文、身份、原始 id 和 URL 查询不会写出。`data-v-*` 和 `tabindex` 只记为不稳定，不会当成选择器。
+当前已经打开的专用 Chrome 不要为了新代码重启。`diagnose-dom` 不会另开浏览器，也不会附着你原来的 Chrome。它只请求**正在运行的新版** `login-prep` 对当前页做一次采样。导出的是标签名、属性名、安全 class 结构，以及值的脱敏分类：重复行 id 在这一屏是否唯一、是不是外壳常用名、`msgtimeformate` 是格式说明还是像日期时间、`title` / `aria-label` 是否恰好为买家、商家、已回复、未回复。原始 id、正文、身份、日期原文和 URL 不会写出。`data-v-*` 和 `tabindex` 只记为不稳定，不会当成选择器。
+
+一次采样不能证明 id 换消息后仍稳定，所以 `can_use_for_dedupe` 保持 false。格式说明不会被当成时间；形状像时间也只记为需要人工确认含义，`can_treat_time_as_message_time` 保持 false。其它文字只记为 `other_redacted`。隐藏行、重复 id、或 `aria-rowcount` 大于当前渲染行数时，证据记为不充分。结果里的 `human_checks` 是最低必要的人工核对，不是采集成功。生产 mapping 仍是 false。
 
 没有进程在听时，结果是 `diagnostic_error` / `listener_not_running`，`nodes` 为 null。空结果不是“平台不支持”。字段不存在、会话未选中、诊断失败是三种不同状态。
 
@@ -59,7 +61,7 @@ python -m inbox_collector diagnose-dom --data-dir data --timeout-seconds 2
 这次代码不会替你执行这条命令去碰已经登录的窗口。先在本机用测试看结构导出：
 
 ```bash
-python -m unittest tests.test_dom_diagnose tests.test_browser_e2e.BrowserE2ETest.test_diagnose_uses_the_open_page_without_navigation -b
+python -m unittest tests.test_dom_diagnose tests.test_browser_e2e.BrowserE2ETest.test_value_shapes_are_classified_without_raw_values tests.test_browser_e2e.BrowserE2ETest.test_diagnose_uses_the_open_page_without_navigation -b
 ```
 
 采集仍然要等真实 DOM 核对之后。在那之前：
