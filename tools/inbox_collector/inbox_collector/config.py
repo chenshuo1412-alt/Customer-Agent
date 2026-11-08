@@ -13,6 +13,7 @@ from inbox_collector.mapping import (
     load_mapping,
     local_entry_problems,
     local_fixture_problems,
+    login_prep_entry_problems,
     mapping_problems,
 )
 
@@ -43,6 +44,7 @@ class AppConfig:
     retention_days: int
     entry_url: str
     login_wait_seconds: int
+    browser_executable: str
     config_path: Path
 
 
@@ -82,7 +84,7 @@ def load_config(path: Path) -> tuple[AppConfig | None, list[str]]:
         problems.append("remote_config_refused")
 
     mode = str(raw.get("mode") or "").strip()
-    if mode not in {"fixture", "real", "browser_local"}:
+    if mode not in {"fixture", "real", "browser_local", "login_prep"}:
         problems.append("mode_invalid")
     timezone = str(raw.get("timezone") or "").strip()
     try:
@@ -117,8 +119,16 @@ def load_config(path: Path) -> tuple[AppConfig | None, list[str]]:
         problems.append("login_wait_invalid")
         login_wait = 0
     entry_url = str(raw.get("entry_url") or "").strip()
+    browser_executable = raw.get("browser_executable", "")
+    if not isinstance(browser_executable, str):
+        problems.append("browser_executable_invalid")
+        browser_executable = ""
     if mode == "browser_local":
         problems.extend(local_entry_problems(entry_url))
+    elif mode == "real" and entry_url:
+        problems.extend(local_entry_problems(entry_url))
+    elif mode == "login_prep":
+        problems.extend(login_prep_entry_problems(entry_url))
 
     base = path.parent
     mapping_value = raw.get("mapping_path")
@@ -197,6 +207,7 @@ def load_config(path: Path) -> tuple[AppConfig | None, list[str]]:
             retention_days=int(retention),
             entry_url=entry_url,
             login_wait_seconds=int(login_wait),
+            browser_executable=browser_executable,
             config_path=path.resolve(),
         ),
         [],
@@ -214,6 +225,18 @@ def readiness_problems(config: AppConfig, mapping: dict[str, Any] | None) -> lis
             problems.append("open_conversation_not_permitted")
         problems.extend(local_fixture_problems(mapping))
         problems.extend(entry_allowed_by_mapping(config.entry_url, mapping))
+    elif config.mode == "login_prep":
+        if config.open_conversation:
+            problems.append("open_conversation_not_permitted")
+        problems.extend(login_prep_entry_problems(config.entry_url))
+        if config.draft_provider != "none":
+            problems.append("login_prep_provider_must_be_none")
+        if config.webhook_enabled or config.webhook_allow_network:
+            problems.append("login_prep_webhook_forbidden")
+        if config.alert_sink_enabled:
+            problems.append("login_prep_alert_sink_forbidden")
+        if config.model_enabled:
+            problems.append("login_prep_model_forbidden")
     elif config.mode != "fixture":
         problems.append("mode_invalid")
     if config.mode == "fixture" and (config.fixture_path is None or not config.fixture_path.is_file()):

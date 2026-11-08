@@ -22,7 +22,10 @@ def build_health(
     problems = [] if config is None else readiness_problems(config, mapping)
     if config is not None and config.mode == "real":
         problems.append("real_mode_refused")
-    elif config is not None and config.mode not in {"fixture", "browser_local"}:
+    elif config is not None and config.mode == "login_prep" and state == "running":
+        state = "stopped"
+        reason = "login_prep_is_not_collection"
+    elif config is not None and config.mode not in {"fixture", "browser_local", "login_prep"}:
         problems.append("mode_invalid")
     if problems and state == "running":
         state = "stopped"
@@ -30,6 +33,9 @@ def build_health(
     if state == "running" and not process_alive:
         state = "stopped"
         reason = "process_not_alive"
+    if state == "login_prep" and not process_alive:
+        state = "stopped"
+        reason = "login_prep_not_active"
     webhook_allowed = isinstance(provider, WebhookProvider) and provider.network_allowed()
     if (
         config is not None
@@ -50,6 +56,8 @@ def build_health(
         "source_kind": store.get_meta("last_source_kind"),
         "real_store_connected": False,
         "real_store_login_verified": False,
+        "production_running": False,
+        "merchant_collection_enabled": False,
         "live_dom_verified": False,
         "local_fixture_mapping_ok": bool(mapping) and local_fixture_problems(mapping) == [],
         "browser_launched": store.get_meta("browser_launched") == "1",

@@ -8,6 +8,7 @@ import os
 import stat
 import threading
 import unittest
+from unittest import mock
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -21,7 +22,8 @@ from inbox_collector.browser_plan import (
 from inbox_collector.cli import main
 from inbox_collector.config import load_config
 from inbox_collector.demo_data import BASELINE_SNAPSHOT, NEW_MESSAGE, NEW_SNAPSHOT, OLD_MESSAGE, snapshot
-from inbox_collector.mapping import mapping_problems
+from inbox_collector.browser_session import resolve_browser_executable
+from inbox_collector.mapping import login_prep_entry_problems, mapping_problems
 from inbox_collector.models import snapshot_from_dict
 from inbox_collector.pipeline import Pipeline
 from inbox_collector.providers import (
@@ -622,6 +624,54 @@ class CollectorTest(unittest.TestCase):
         with self.assertRaises(BrowserLaunchRefused):
             assert_isolated_profile(Path("/Users/example/Library/Application Support/Google/Chrome"))
         store.close()
+
+    def test_login_prep_allowlist_is_not_collection(self) -> None:
+        chat = "https://mms.pinduoduo.com/chat-merchant/index.html#/"
+        self.assertEqual(login_prep_entry_problems(chat), [])
+        self.assertEqual(login_prep_entry_problems("https://mms.pinduoduo.com/login"), [])
+        self.assertEqual(
+            login_prep_entry_problems("https://mms.pinduoduo.com/plateau/chat/send_message"),
+            ["login_prep_entry_refused"],
+        )
+        path = self.config(
+            mode="login_prep",
+            draft_provider="none",
+            entry_url=chat,
+            mapping_path=str(ROOT / "mappings" / "pinduoduo_chat_merchant.json"),
+        )
+        loaded, problems = load_config(path)
+        self.assertEqual(problems, [], problems)
+        assert loaded is not None
+        with mock.patch(
+            "inbox_collector.browser_session.DedicatedBrowser.start",
+            side_effect=AssertionError("browser opened"),
+        ):
+            self.assertEqual(main(["check-config", "--config", str(path)]), 0)
+            self.assertEqual(main(["run", "--config", str(path), "--once"]), 2)
+            self.assertEqual(
+                main(["check-config", "--config", str(ROOT / "config.login-prep.example.json")]),
+                0,
+            )
+            blocked = self.config(
+                mode="login_prep",
+                draft_provider="none",
+                entry_url=chat,
+                webhook={
+                    "enabled": True,
+                    "url": "https://collector.invalid/hook",
+                    "webhook_secret_env": "INBOX_TEST_WEBHOOK_SECRET",
+                    "allow_network": True,
+                },
+            )
+            self.assertEqual(main(["check-config", "--config", str(blocked)]), 2)
+        executable = self.root / "FakeChrome"
+        executable.write_text("not a browser", encoding="utf-8")
+        executable.chmod(0o755)
+        self.assertEqual(resolve_browser_executable(str(executable)), str(executable))
+        with self.assertRaises(Exception):
+            resolve_browser_executable(
+                "/Users/example/Library/Application Support/Google/Chrome/Google Chrome"
+            )
 
     def test_merchant_entry_is_refused_before_a_browser_exists(self) -> None:
         path = self.config(

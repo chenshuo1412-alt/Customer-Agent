@@ -55,13 +55,17 @@ class Runner:
         problems = readiness_problems(self.config, self.mapping)
         if self.config.mode == "real":
             problems.append("real_mode_refused")
+        elif self.config.mode == "login_prep":
+            problems.append("use_login_prep_command")
         elif self.config.mode not in {"fixture", "browser_local"}:
             problems.append("mode_invalid")
         if problems:
             self.store.set_state("stopped", "config_incomplete")
             self.store.set_meta("readiness_problems", ",".join(dict.fromkeys(problems)))
             log_event("not_running", alert="config_incomplete")
-            return self.health(False)
+            report = self.health(False)
+            report["readiness_problems"] = list(dict.fromkeys([*report["readiness_problems"], *problems]))
+            return report
         state, reason = self.store.state_reason()
         if state == "paused" or reason == "failure_ceiling":
             log_event("not_running", state=state, alert=reason)

@@ -19,6 +19,43 @@ python -m inbox_collector demo --data-dir /tmp/inbox-collector-demo
 
 示例草稿见 `sample_output/mock_draft.example.json`。`draft_text` 固定为模拟句，不是模型写给买家的答案。
 
+## 在 Mac mini 上安装
+
+只在这个目录里操作，不要运行仓库根目录的 `app.py`。下面的命令不会打开商家页面。
+
+```bash
+cd tools/inbox_collector
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[browser]"
+python -m playwright install chromium
+python -m inbox_collector check-config --config config.login-prep.example.json
+```
+
+也可以执行 `sh scripts/install_mac.sh`，它只做上面的安装，不会启动浏览器。
+
+首次登录必须人工完成。在同一个目录、同一个虚拟环境里：
+
+```bash
+source .venv/bin/activate
+python -m inbox_collector login-prep --config config.login-prep.example.json
+```
+
+这会新建 `data/own-browser-profile`（权限仅本人可读写），并用有界面浏览器打开 `https://mms.pinduoduo.com/chat-merchant/index.html#/`。macOS 上如果装了 Chrome，会用这个新 profile 启动 `/Applications/Google Chrome.app`，不会打开现有 Chrome 用户目录，也不会附着已经在跑的窗口。请自己登录。关掉窗口后进程结束。
+
+这一步不采集消息、不生成草稿、不调用 Webhook。`real_store_login_verified` 仍是 false，`production_running` 仍是 false。`run` 不能代替 `login-prep`，采集模式仍然拒绝这个商家地址。
+
+Profile 里会留下登录态，只放在本机，不要复制、同步或提交。程序不读取 Cookie 文件。
+
+采集仍然要等真实 DOM 核对之后。在那之前：
+
+```bash
+python -m inbox_collector validate-mapping --mapping mappings/pinduoduo_chat_merchant.json
+```
+
+这条命令会失败。去重、离线告警和 BOT 接入都还要在你自己的机器上验收。Webhook 保持关闭，不要把别的 BOT 密钥写进配置。
+
 ## 采样间隔
 
 `sample_interval_seconds` 默认 120，只允许 60–120。这是**本程序自己的前台循环参数**，不是 Grok Bot 的定时任务。不要把它拆成多次 5 分钟以内的机器人 routine，也不要接管 Grok Bot 的浏览器。
@@ -69,7 +106,7 @@ HTTP 200 只表示传输被接受，状态是 `webhook_transport_accepted_awaiti
 
 代码能打开的是**新建的有界面 Chromium** 和一块空的 `data_dir/own-browser-profile`。这不等于实店已登录，也不是操作者原来的 Chrome 主账号。
 
-1. **实店登录。** 商家地址在配置阶段就拒绝，浏览器不会打开。以后若要登录，操作者必须在这个新 profile 里自己打开聊天页。程序不填账号密码。登录页、验证码、「账号在别处登录」只写本地告警并暂停，不会自动重登，也没有远端叫醒。`claims_user_wakeup` 恒为 false，`alert_delivery` 是 `local_only`。
+1. **实店登录还没完成。** `login-prep` 只负责把专用浏览器打开到允许的登录页，等人自己登录。它不把登录标成已验证，也不开始采集。采集模式在 `real_store_login_verified=false` 时仍然不会把商家页当收件箱来跑。程序不填密码。登录页、验证码和「账号在别处登录」只写本地告警，不会自动重登，也不会远端叫醒。`claims_user_wakeup` 恒为 false，`alert_delivery` 是 `local_only`。
 2. **真实 DOM。** `mappings/pinduoduo_chat_merchant.json` 仍然没有选择器。`live_dom_verified` 恒为 false。本地 mapping 的 `data-*` 只用于本仓库的通用收件箱，不能套到商家页面。
 3. **BOT。** 没有 Webhook 密钥，也没有确认现有 BOT 只出草稿。默认 `bot_integration` 是 `blocked_not_connected`。即使以后配齐 URL、secret 和网络开关，状态也只是 `webhook_configured_unverified`。传输成功不是草稿已生成，更不是 BOT 的真实回复。mock 草稿带「模拟草稿」字样。
 4. **调度。** 前台循环的间隔仍是 60–120 秒，由本程序自己 `sleep`。它不是 Bot routine，也不会去接管别的浏览器或调试端口。

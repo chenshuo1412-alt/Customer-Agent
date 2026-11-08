@@ -11,9 +11,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from unittest import mock
+
 from inbox_collector.cli import main
 from inbox_collector.config import load_config
+from inbox_collector.login_prep import run_login_prep
 from inbox_collector.mapping import load_mapping
+from inbox_collector.store import Store
 from inbox_collector.runner import Runner
 from inbox_collector.safety import CANNED_DRAFT_TEXT
 from inbox_collector.providers import provider_for
@@ -50,6 +54,9 @@ def _page(inner: str, *, state: str, complete: str) -> str:
 
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
+        hosts = getattr(self.server, "hosts", None)
+        if isinstance(hosts, list):
+            hosts.append(self.headers.get("Host", ""))
         body = self.server.html_path.read_bytes()  # type: ignore[attr-defined]
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -270,6 +277,44 @@ class BrowserE2ETest(unittest.TestCase):
         self.assertTrue(report["browser_launched"])
         self.assertFalse(report["real_store_connected"])
         self.assertEqual(report["alert_delivery"], "local_only")
+
+    def test_login_prep_opens_local_page_without_collecting_or_sending(self) -> None:
+        self.html_path.write_text(
+            (ROOT / "fixtures" / "browser_login.html").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        path = self._config(mode="login_prep", draft_provider="none", login_wait_seconds=1)
+        loaded, problems = load_config(path)
+        self.assertEqual(problems, [], problems)
+        assert loaded is not None
+        hosts: list[str] = []
+        self.server.hosts = hosts  # type: ignore[attr-defined]
+        with mock.patch("urllib.request.urlopen", side_effect=AssertionError("outbound")):
+            report = run_login_prep(loaded, load_mapping(loaded.mapping_path), hold_seconds=0.4)
+        self.assertEqual(report["opened_host"], "127.0.0.1")
+        self.assertEqual(report["messages_collected"], 0)
+        self.assertEqual(report["drafts_created"], 0)
+        self.assertFalse(report["production_running"])
+        self.assertFalse(report["merchant_collection_enabled"])
+        self.assertFalse(report["real_store_login_verified"])
+        self.assertFalse(report["real_store_connected"])
+        self.assertNotEqual(report["state"], "running")
+        self.assertEqual(report["state_reason"], "login_prep_closed")
+        self.assertEqual(report["bot_integration"], "blocked_not_connected")
+        self.assertTrue(hosts)
+        self.assertTrue(all(host.startswith("127.0.0.1") for host in hosts))
+        reopened = Store(self.data)
+        try:
+            states = [item[0] for item in reopened.run_log()]
+            self.assertIn("login_prep", states)
+            self.assertNotIn("running", states)
+            self.assertEqual(reopened.count_messages(), 0)
+        finally:
+            reopened.close()
+        marker = json.loads(
+            (self.data / "own-browser-profile" / "inbox-collector-profile.json").read_text(encoding="utf-8")
+        )
+        self.assertFalse(marker["copied_login"])
 
     def test_browser_local_example_checks_without_launching(self) -> None:
         self.assertEqual(

@@ -1,0 +1,25 @@
+{
+  "mode": "login_prep",
+  "timezone": "Asia/Shanghai",
+  "sample_interval_seconds": 120,
+  "login_wait_seconds": 180,
+  "max_retries": 1,
+  "max_consecutive_failures": 3,
+  "open_conversation": false,
+  "allow_browser_launch": true,
+  "mapping_path": "mappings/pinduoduo_chat_merchant.json",
+  "entry_url": "https://mms.pinduoduo.com/chat-merchant/index.html#/",
+  "data_dir": "data",
+  "draft_provider": "none",
+  "browser_executable": "",
+  "retention_days": 30,
+  "webhook": {
+    "enabled": false
+  },
+  "alert_sink": {
+    "enabled": false
+  },
+  "model": {
+    "enabled": false
+  }
+}

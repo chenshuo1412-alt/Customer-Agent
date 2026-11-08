@@ -37,7 +37,7 @@ def browser_plan(config: AppConfig, mapping: dict[str, Any] | None = None) -> di
     profile = config.data_dir / "own-browser-profile"
     assert_isolated_profile(profile)
     problems = readiness_problems(config, mapping)
-    launch = config.mode == "browser_local" and not problems
+    launch = config.mode in {"browser_local", "login_prep"} and not problems
     return {
         "verified": False,
         "launch": launch,
@@ -49,6 +49,8 @@ def browser_plan(config: AppConfig, mapping: dict[str, Any] | None = None) -> di
         "autofill_credentials": False,
         "profile_dir": str(profile),
         "will_open": config.entry_url if launch else None,
+        "collects_messages": config.mode == "browser_local" and launch,
+        "production_running": False,
         "merchant_entry_blocked": "https://mms.pinduoduo.com/chat-merchant/index.html#/",
         "sample_interval_seconds": config.sample_interval_seconds,
         "interval_is_application_setting": True,
@@ -68,7 +70,11 @@ def launch_independent_browser(
     mapping: dict[str, Any] | None = None,
 ) -> Any:
     """Start the dedicated headed browser, or refuse before creating a process."""
-    if config is None or config.mode != "browser_local":
+    if config is None or config.mode == "real":
+        raise BrowserLaunchRefused("real_dom_unverified")
+    if config.mode == "login_prep":
+        raise BrowserLaunchRefused("use_login_prep_command")
+    if config.mode != "browser_local":
         raise BrowserLaunchRefused("real_dom_unverified")
     problems = readiness_problems(config, mapping)
     if problems:

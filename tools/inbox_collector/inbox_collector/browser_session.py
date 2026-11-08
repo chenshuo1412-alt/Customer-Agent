@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 from inbox_collector.browser_plan import BrowserLaunchRefused, assert_isolated_profile
@@ -56,11 +57,32 @@ def _process_matches(profile: Path) -> tuple[int | None, str]:
     return found
 
 
+def resolve_browser_executable(configured: str) -> str | None:
+    """Pick a browser binary. Never a Chrome user-data directory."""
+    if configured:
+        path = Path(configured).expanduser()
+        lowered = str(path).lower()
+        if (
+            not path.is_file()
+            or "application support/google/chrome" in lowered
+            or "cookies" in lowered
+            or path.name.lower() in {"cookies", "login data"}
+        ):
+            raise BrowserLaunchRefused("browser_executable_refused")
+        return str(path)
+    if sys.platform == "darwin":
+        chrome = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        if chrome.is_file():
+            return str(chrome)
+    return None
+
+
 class DedicatedBrowser:
     """Lifecycle for one headed browser this application started itself."""
 
-    def __init__(self, profile_dir: Path) -> None:
+    def __init__(self, profile_dir: Path, executable: str = "") -> None:
         self.profile_dir = profile_dir
+        self.executable = executable
         self.launched = False
         self.headless = False
         self.pid: int | None = None
@@ -72,41 +94,49 @@ class DedicatedBrowser:
         if self.launched:
             return
         _owned_profile(self.profile_dir)
-        if not os.environ.get("DISPLAY"):
+        if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
             raise BrowserLaunchRefused("headed_display_missing")
+        executable = resolve_browser_executable(self.executable)
         try:
             from playwright.sync_api import sync_playwright
         except ImportError as exc:
             raise BrowserLaunchRefused("playwright_missing") from exc
+        launch_args = ["--no-first-run", "--no-default-browser-check", "--disable-sync"]
+        if sys.platform.startswith("linux"):
+            launch_args.extend(["--no-sandbox", "--disable-dev-shm-usage"])
         playwright = sync_playwright().start()
         try:
-            context = playwright.chromium.launch_persistent_context(
-                str(self.profile_dir),
-                headless=False,
-                viewport={"width": 1100, "height": 800},
-                args=[
-                    "--no-first-run",
-                    "--no-default-browser-check",
-                    "--disable-sync",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                ],
-            )
+            if executable:
+                context = playwright.chromium.launch_persistent_context(
+                    str(self.profile_dir),
+                    headless=False,
+                    executable_path=executable,
+                    viewport={"width": 1100, "height": 800},
+                    args=launch_args,
+                )
+            else:
+                context = playwright.chromium.launch_persistent_context(
+                    str(self.profile_dir),
+                    headless=False,
+                    viewport={"width": 1100, "height": 800},
+                    args=launch_args,
+                )
         except Exception:
             playwright.stop()
             raise
         self._playwright = playwright
         self._context = context
         self.page = context.pages[0] if context.pages else context.new_page()
-        pid, command = _process_matches(self.profile_dir)
-        debug_flag = "remote-" + "debugging-" + "port"
-        if debug_flag in command or "--headless" in command:
-            self.close()
-            raise BrowserLaunchRefused("refusing_debug_port")
-        if pid is None:
-            self.close()
-            raise BrowserLaunchRefused("browser_process_not_found")
-        self.pid = pid
+        if Path("/proc").is_dir():
+            pid, command = _process_matches(self.profile_dir)
+            debug_flag = "remote-" + "debugging-" + "port"
+            if debug_flag in command or "--headless" in command:
+                self.close()
+                raise BrowserLaunchRefused("refusing_debug_port")
+            if pid is None:
+                self.close()
+                raise BrowserLaunchRefused("browser_process_not_found")
+            self.pid = pid
         self.launched = True
         self.headless = False
 

@@ -120,6 +120,42 @@ def local_entry_problems(url: str) -> list[str]:
     return ["entry_url_not_local"]
 
 
+_LOGIN_PREP_MERCHANT_PAGES = frozenset(
+    {
+        ("mms.pinduoduo.com", "/chat-merchant/index.html"),
+        ("mms.pinduoduo.com", "/login"),
+        ("mms.pinduoduo.com", "/login/"),
+    }
+)
+
+
+def login_prep_entry_problems(url: str) -> list[str]:
+    """URLs a manual login window may open. Collection uses a stricter check.
+
+    Local fixtures are allowed so the launch path can be tested without the
+    merchant site. The only remote pages are the public login and chat entry,
+    with no query string. API and send paths are refused.
+    """
+    if not url or not url.strip():
+        return ["entry_url_missing"]
+    local = local_entry_problems(url)
+    if not local:
+        return []
+    parts = urlsplit(url.strip())
+    host = (parts.hostname or "").lower().rstrip(".")
+    path = parts.path or "/"
+    if (
+        parts.scheme == "https"
+        and not parts.query
+        and not parts.username
+        and not parts.password
+        and parts.fragment in {"", "/"}
+        and (host, path) in _LOGIN_PREP_MERCHANT_PAGES
+    ):
+        return []
+    return ["login_prep_entry_refused"]
+
+
 def entry_allowed_by_mapping(url: str, mapping: dict[str, Any] | None) -> list[str]:
     problems = local_entry_problems(url)
     if problems or not isinstance(mapping, dict):

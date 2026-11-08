@@ -142,7 +142,7 @@ class Store:
         )
 
     def set_state(self, state: str, reason: str) -> None:
-        if state not in {"running", "paused", "stopped"}:
+        if state not in {"running", "paused", "stopped", "login_prep"}:
             raise ValueError("bad_state")
         now = utc_now()
         owns = not self._txn

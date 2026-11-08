@@ -13,6 +13,7 @@ from inbox_collector.browser_plan import BrowserLaunchRefused, assert_isolated_p
 from inbox_collector.config import AppConfig, load_config, load_mapping_for, readiness_problems
 from inbox_collector.demo_data import BASELINE_SNAPSHOT, NEW_SNAPSHOT
 from inbox_collector.health import build_health
+from inbox_collector.login_prep import run_login_prep
 from inbox_collector.mapping import local_fixture_problems, mapping_problems
 from inbox_collector.models import snapshot_from_dict
 from inbox_collector.pipeline import Pipeline
@@ -76,6 +77,8 @@ def cmd_check(config_path: Path) -> int:
             "local_fixture_mapping_ok": bool(mapping) and local_fixture_problems(mapping) == [],
             "live_dom_verified": False,
             "bot_integration": "blocked_not_connected",
+            "production_running": False,
+            "merchant_collection_enabled": False,
             "sample_interval_seconds": config.sample_interval_seconds,
             "interval_is_bot_routine": False,
         }
@@ -106,6 +109,21 @@ def cmd_validate_mapping(path: Path) -> int:
         }
     )
     return 0 if local_ok or merchant_ok else 2
+
+
+def cmd_login_prep(config_path: Path) -> int:
+    config, problems = load_config(config_path)
+    if config is None:
+        _print({"ok": False, "problems": problems, "state": "stopped", "production_running": False})
+        return 2
+    mapping, _errors = load_mapping_for(config)
+    report = run_login_prep(config, mapping)
+    _print(report)
+    if report.get("readiness_problems"):
+        return 2
+    if report.get("state") == "paused":
+        return 3
+    return 0
 
 
 def cmd_run(config_path: Path, *, once: bool, cycles: int) -> int:
@@ -219,7 +237,7 @@ def browser_plan_launch_refused() -> bool:
 
 
 def _exit_for(report: dict[str, Any]) -> int:
-    if report.get("readiness_problems"):
+    if report.get("readiness_problems") or report.get("state_reason") == "config_incomplete":
         return 2
     if report.get("state") == "paused":
         return 3
@@ -255,6 +273,9 @@ def build_parser() -> argparse.ArgumentParser:
     demo = sub.add_parser("demo")
     demo.add_argument("--data-dir", type=Path, required=True)
 
+    login_prep = sub.add_parser("login-prep")
+    login_prep.add_argument("--config", type=Path, required=True)
+
     plan = sub.add_parser("browser-plan")
     plan.add_argument("--config", type=Path, required=True)
     return parser
@@ -287,6 +308,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return cmd_resume(args.data_dir, acknowledge_hard_stop=args.acknowledge_hard_stop)
     if args.command == "demo":
         return cmd_demo(args.data_dir)
+    if args.command == "login-prep":
+        return cmd_login_prep(args.config)
     if args.command == "browser-plan":
         config, problems = load_config(args.config)
         if config is None:
