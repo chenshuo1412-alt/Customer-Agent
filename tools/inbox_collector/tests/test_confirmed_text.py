@@ -703,7 +703,12 @@ class ConfirmedTextTest(unittest.TestCase):
             plant_legacy(failed, _CHALLENGE, _REPLY)
             write_authorization(failed, challenge=_NEW_CHALLENGE, reply=_NEW_REPLY, window_id="ab" * 16, expires_at=time.time() + 60)
             broken_fill = _Gate(fail_fill=True)
-            self.assertEqual(run_confirmed_text(broken_fill, failed, _NEW_CHALLENGE, window_id="ab" * 16)["status"], "evaluate_failed")
+            fill_report = run_confirmed_text(broken_fill, failed, _NEW_CHALLENGE, window_id="ab" * 16)
+            self.assertEqual(fill_report["status"], "paused_uncertain")
+            self.assertEqual(fill_report["phases"][0]["phase"], "fill")
+            self.assertTrue(fill_report["phases"][0]["called"])
+            self.assertFalse(fill_report["phases"][0]["returned"])
+            self.assertFalse(fill_report["click_attempted"])
             self.assertEqual(run_confirmed_text(_Gate(), failed, _NEW_CHALLENGE, window_id="ab" * 16)["status"], "attempt_consumed")
             self.assertEqual(broken_fill.fills, 0)
             clicked = root / "fail-click"
@@ -963,6 +968,161 @@ class ConfirmedTextTest(unittest.TestCase):
                 self.assertFalse(sent["input_state"]["reply_scan_truncated"])
                 self.assertFalse(sent["delivery_claimed"])
                 browser.close()
+
+    def test_phase_trace_separates_call_from_return(self) -> None:
+        secret = "买家张三 " + _NEW_REPLY
+
+        class _El:
+            def __init__(self, page: "_Page") -> None:
+                self.page = page
+
+            def as_element(self) -> "_El":
+                return self
+
+            def input_value(self) -> str:
+                return ""
+
+            def fill(self, text: str) -> None:
+                self.page.fill_calls += 1
+                self.page.filled = True
+
+            def click(self) -> None:
+                self.page.click_calls += 1
+                if self.page.fail_click:
+                    raise TimeoutError(secret)
+                self.page.clicks += 1
+
+            def evaluate(self, script: str) -> dict:
+                return {"tag": "button", "classes": ["send-btn"]}
+
+        class _Bundle:
+            def __init__(self, page: "_Page") -> None:
+                self.page = page
+
+            def evaluate(self, script: str) -> dict:
+                return {"ok": True, "status": "ready"}
+
+            def get_property(self, name: str) -> _El:
+                return _El(self.page)
+
+            def dispose(self) -> None:
+                return None
+
+        class _Page:
+            def __init__(self, *, fail_observe: bool = False, fail_click: bool = False, receipt: bool = True) -> None:
+                self.fill_calls = 0
+                self.click_calls = 0
+                self.clicks = 0
+                self.filled = False
+                self.observe_calls = 0
+                self.fail_observe = fail_observe
+                self.fail_click = fail_click
+                self.receipt = receipt
+
+            def evaluate(self, script: str, arg: object | None = None) -> dict:
+                if "CONFIRMED_TEXT_READ" in script:
+                    return {
+                        "marker": "CONFIRMED_TEXT_READ",
+                        "match_count": 1,
+                        "highlight_count": 0,
+                        "input_count": 1,
+                        "input_empty": True,
+                        "sender_count": 1,
+                        "reply_visible_count": 0,
+                        "reply_scan_truncated": False,
+                        "panel_fingerprint": "div.panel|li.row|div.composer",
+                        "row_id_raw": "msg-phase-token",
+                    }
+                if "INPUT_STATE_READONLY" in script:
+                    self.observe_calls += 1
+                    if self.fail_observe and self.observe_calls >= 2:
+                        raise TimeoutError(secret)
+                    visible = self.filled and self.receipt and self.clicks > 0
+                    return {
+                        "marker": "INPUT_STATE_READONLY",
+                        "match_count": 1,
+                        "input_count": 1,
+                        "input_nonempty": self.filled,
+                        "input_equals_reply": self.filled,
+                        "sender_count": 1,
+                        "sender": {"tag": "button", "classes": ["send-btn"], "visible": True, "disabled": False, "label_kind": "send"},
+                        "visible_captcha": False,
+                        "visible_error": False,
+                        "flag_classes": [],
+                        "reply_exact_count": 1 if visible else 0,
+                        "reply_scan_truncated": False,
+                        "reply_scan_reason": None,
+                        "reply_rows_total": 1,
+                        "reply_rows_checked": 1,
+                        "reply_nodes_checked": 3,
+                        "reply_row_cap": 200,
+                        "reply_node_cap": 8000,
+                        "coverage_scope": "target_panel_rendered_onemsg",
+                        "panel_fingerprint": "div.panel|li.row|div.composer",
+                        "row_id_raw": "msg-phase-token",
+                        "values_included": False,
+                    }
+                raise AssertionError("unexpected evaluate")
+
+            def evaluate_handle(self, script: str, arg: object | None = None) -> _Bundle:
+                return _Bundle(self)
+
+        def phase(report: dict, name: str) -> dict:
+            found = [item for item in report["phases"] if item["phase"] == name]
+            self.assertEqual(len(found), 1)
+            return found[0]
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            observed = root / "observe"
+            plant_legacy(observed, _CHALLENGE, _REPLY)
+            write_authorization(observed, challenge=_NEW_CHALLENGE, reply=_NEW_REPLY, window_id="ab" * 16, expires_at=time.time() + 60)
+            page = _Page(fail_observe=True)
+            report = run_confirmed_text(page, observed, _NEW_CHALLENGE, window_id="ab" * 16, receipt_wait_seconds=0.2)
+            blob = json.dumps(report, ensure_ascii=False)
+            self.assertEqual(report["status"], "paused_uncertain")
+            self.assertTrue(phase(report, "fill")["returned"])
+            self.assertTrue(phase(report, "input_observe")["called"])
+            self.assertFalse(phase(report, "input_observe")["returned"])
+            self.assertEqual(phase(report, "input_observe")["error_class"], "timeout")
+            self.assertNotIn("click", [item["phase"] for item in report["phases"]])
+            self.assertEqual(page.click_calls, 0)
+            self.assertFalse(report["delivery_claimed"])
+            self.assertFalse(report["production_send_allowed"])
+            self.assertNotIn(secret, blob)
+            self.assertNotIn(_NEW_REPLY, blob)
+            self.assertNotIn("张三", blob)
+
+            clicked = root / "click"
+            plant_legacy(clicked, _CHALLENGE, _REPLY)
+            write_authorization(clicked, challenge=_NEW_CHALLENGE, reply=_NEW_REPLY, window_id="ab" * 16, expires_at=time.time() + 60)
+            slow_click = _Page(fail_click=True)
+            click_report = run_confirmed_text(slow_click, clicked, _NEW_CHALLENGE, window_id="ab" * 16, receipt_wait_seconds=0.2)
+            click_blob = json.dumps(click_report, ensure_ascii=False)
+            self.assertEqual(slow_click.click_calls, 1)
+            self.assertTrue(phase(click_report, "click")["called"])
+            self.assertFalse(phase(click_report, "click")["returned"])
+            self.assertEqual(phase(click_report, "click")["error_class"], "timeout")
+            self.assertTrue(click_report["click_attempted"])
+            self.assertFalse(click_report["click_returned"])
+            self.assertNotIn("receipt", [item["phase"] for item in click_report["phases"]])
+            self.assertFalse(click_report["delivery_claimed"])
+            self.assertNotIn(secret, click_blob)
+
+            waiting = root / "receipt"
+            plant_legacy(waiting, _CHALLENGE, _REPLY)
+            write_authorization(waiting, challenge=_NEW_CHALLENGE, reply=_NEW_REPLY, window_id="ab" * 16, expires_at=time.time() + 60)
+            quiet = _Page(receipt=False)
+            receipt_report = run_confirmed_text(quiet, waiting, _NEW_CHALLENGE, window_id="ab" * 16, receipt_wait_seconds=0.2)
+            self.assertEqual(receipt_report["status"], "paused_uncertain")
+            self.assertTrue(phase(receipt_report, "click")["returned"])
+            self.assertTrue(phase(receipt_report, "receipt")["called"])
+            self.assertTrue(phase(receipt_report, "receipt")["returned"])
+            self.assertEqual(phase(receipt_report, "receipt")["error_class"], "deadline")
+            self.assertEqual(receipt_report["receipt"], "absent")
+            self.assertFalse(receipt_report["delivery_claimed"])
+            self.assertFalse(receipt_report["platform_send_proven"])
+            self.assertEqual((waiting / "confirmed-text.ledger.json").read_bytes(), (observed / "confirmed-text.ledger.json").read_bytes())
 
 
 if __name__ == "__main__":

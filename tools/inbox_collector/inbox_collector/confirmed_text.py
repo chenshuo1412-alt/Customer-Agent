@@ -26,6 +26,7 @@ _KIND = "independent_single_test"
 _BUYER = "operator_confirmed_own_account"
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _LEGACY_STATES = frozenset({"uncertain", "revoked", "page_visible", "committed", "sealed"})
+_PHASES = ("fill", "input_observe", "click", "receipt")
 _MAX_REPLY = 40
 _FORBIDDEN = ("价格", "物流", "规格", "安装", "售后", "退款", "改价", "补偿", "赔")
 
@@ -413,6 +414,9 @@ def _report(status: str, **extra: Any) -> dict[str, Any]:
         "buyer_receipt": "unproven",
         "platform_send_proven": False,
         "cause_unproven": True,
+        "phases": [],
+        "input_returned": False,
+        "click_returned": False,
     }
     report.update(extra)
     return report
@@ -540,6 +544,64 @@ def _ledger_state(data_dir: Path) -> str | None:
     if not isinstance(payload, dict) or payload.get("sealed") is not True:
         return "unreadable"
     return str(payload.get("state") or "sealed")
+
+
+class _PhaseTrace:
+    """Call markers written before a UI call returns."""
+
+    def __init__(self) -> None:
+        self.rows: list[dict[str, Any]] = []
+
+    def begin(self, phase: str) -> None:
+        name = phase if phase in _PHASES else "receipt"
+        self.rows.append(
+            {
+                "phase": name,
+                "called": True,
+                "returned": False,
+                "error_class": None,
+                "elapsed_ms": None,
+                "_t": time.monotonic(),
+                "_open": True,
+            }
+        )
+
+    def finish(self, phase: str, error_class: str | None = None) -> None:
+        for row in reversed(self.rows):
+            if row["phase"] == phase and row.get("_open") is True:
+                row["returned"] = True
+                row["error_class"] = error_class
+                row["elapsed_ms"] = max(0, int((time.monotonic() - float(row["_t"])) * 1000))
+                row["_open"] = False
+                return
+
+    def fail_open(self, error_class: str) -> None:
+        for row in reversed(self.rows):
+            if row.get("_open") is True:
+                row["returned"] = False
+                row["error_class"] = error_class if error_class in {"timeout", "error", "deadline"} else "error"
+                row["elapsed_ms"] = max(0, int((time.monotonic() - float(row["_t"])) * 1000))
+                row["_open"] = False
+                return
+
+    def public(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "phase": row["phase"],
+                "called": True,
+                "returned": row["returned"] is True,
+                "error_class": row["error_class"],
+                "elapsed_ms": row["elapsed_ms"],
+            }
+            for row in self.rows
+            if row["phase"] in _PHASES
+        ]
+
+
+def _safe_error_class(exc: BaseException) -> str:
+    if "timeout" in type(exc).__name__.lower():
+        return "timeout"
+    return "error"
 
 
 def _with_legacy(data_dir: Path, before: bytes | None, report: dict[str, Any]) -> dict[str, Any]:
@@ -889,8 +951,11 @@ def run_confirmed_text(
         return _with_legacy(data_dir, legacy_before, _leak_guard(_report(pre_gate, ledger_sealed=True, input_state=_clean_state(recheck), **context), challenge, reply))
     before_count = int(recheck.get("reply_exact_count") or 0)
     bundle = None
-    input_attempted = False
-    click_attempted = False
+    input_called = False
+    input_returned = False
+    click_called = False
+    click_returned = False
+    trace = _PhaseTrace()
     try:
         bundle = page.evaluate_handle(_HANDLES_JS, action_arg)
         picked = bundle.evaluate("(item) => ({ ok: item.ok === true, status: item.status || 'unavailable' })")
@@ -913,10 +978,15 @@ def run_confirmed_text(
         )
         if field.input_value() != "":
             _mark_attempt(data_dir, challenge, reply, "revoked")
-            return _with_legacy(data_dir, legacy_before, _leak_guard(_report("draft_present", ledger_sealed=True, input_state=_clean_state(recheck, before=before_count), **context), challenge, reply))
+            return _with_legacy(data_dir, legacy_before, _leak_guard(_report("draft_present", ledger_sealed=True, input_state=_clean_state(recheck, before=before_count), phases=trace.public(), **context), challenge, reply))
+        trace.begin("fill")
+        input_called = True
         field.fill(reply)
-        input_attempted = True
+        trace.finish("fill")
+        input_returned = True
+        trace.begin("input_observe")
         accepted = page.evaluate(_OBSERVE_JS, action_arg)
+        trace.finish("input_observe")
         if not isinstance(accepted, dict) or accepted.get("input_equals_reply") is not True:
             _mark_attempt(data_dir, challenge, reply, "uncertain")
             return _with_legacy(data_dir, legacy_before, _leak_guard(
@@ -924,16 +994,22 @@ def run_confirmed_text(
                     "input_not_accepted",
                     ledger_sealed=True,
                     input_attempted=True,
+                    input_returned=True,
                     mutated=True,
                     input_method="playwright_fill",
+                    phases=trace.public(),
                     input_state=_clean_state(accepted if isinstance(accepted, dict) else {}, before=before_count),
                     **context,
                 ),
                 challenge,
                 reply,
             ))
+        trace.begin("click")
+        click_called = True
         sender.click()
-        click_attempted = True
+        trace.finish("click")
+        click_returned = True
+        trace.begin("receipt")
         deadline = time.monotonic() + receipt_wait_seconds
         latest = accepted
         while True:
@@ -945,21 +1021,28 @@ def run_confirmed_text(
             if time.monotonic() >= deadline:
                 break
             time.sleep(RECEIPT_POLL_SECONDS)
+        receipt_done = isinstance(latest, dict) and latest.get("reply_scan_truncated") is not True and int(latest.get("reply_exact_count") or 0) > before_count
+        trace.finish("receipt", None if receipt_done else "deadline")
     except Exception as exc:
+        trace.fail_open(_safe_error_class(exc))
         _mark_attempt(data_dir, challenge, reply, "uncertain")
-        return _with_legacy(data_dir, legacy_before, _report(
-            "evaluate_failed" if not input_attempted and not click_attempted else "paused_uncertain",
+        entered = input_called or click_called
+        return _with_legacy(data_dir, legacy_before, _leak_guard(_report(
+            "paused_uncertain" if entered else "evaluate_failed",
             ledger_sealed=True,
-            input_attempted=input_attempted,
-            click_attempted=click_attempted,
-            mutated=input_attempted,
-            clicked=click_attempted,
-            input_method="playwright_fill" if input_attempted else None,
-            click_method="playwright_click" if click_attempted else None,
-            error_type=type(exc).__name__,
-            receipt="absent" if input_attempted or click_attempted else "not_sent",
+            input_attempted=input_called,
+            input_returned=input_returned,
+            click_attempted=click_called,
+            click_returned=click_returned,
+            mutated=input_returned,
+            clicked=click_returned,
+            input_method="playwright_fill" if input_called else None,
+            click_method="playwright_click" if click_called else None,
+            error_class=_safe_error_class(exc),
+            phases=trace.public(),
+            receipt="absent" if entered else "not_sent",
             **context,
-        ))
+        ), challenge, reply))
     finally:
         if bundle is not None:
             try:
@@ -968,7 +1051,7 @@ def run_confirmed_text(
                 pass
     appeared = isinstance(latest, dict) and latest.get("reply_scan_truncated") is not True and int(latest.get("reply_exact_count") or 0) > before_count
     state = _clean_state(latest if isinstance(latest, dict) else {}, before=before_count)
-    if appeared and input_attempted and click_attempted:
+    if appeared and input_returned and click_returned:
         _mark_attempt(data_dir, challenge, reply, "page_visible")
         return _with_legacy(data_dir, legacy_before, _leak_guard(
             _report(
@@ -984,6 +1067,9 @@ def run_confirmed_text(
                 clicked_classes=sender_meta.get("classes") if isinstance(sender_meta, dict) else [],
                 receipt="page_visible",
                 ledger_sealed=True,
+                input_returned=True,
+                click_returned=True,
+                phases=trace.public(),
                 input_state=state,
                 receipt_wait_seconds=receipt_wait_seconds,
                 **context,
@@ -996,16 +1082,19 @@ def run_confirmed_text(
     return _with_legacy(data_dir, legacy_before, _leak_guard(
         _report(
             "paused_uncertain",
-            clicked=click_attempted,
-            mutated=input_attempted,
-            input_attempted=input_attempted,
-            click_attempted=click_attempted,
-            input_method="playwright_fill" if input_attempted else None,
-            click_method="playwright_click" if click_attempted else None,
+            clicked=click_returned,
+            mutated=input_returned,
+            input_attempted=input_called,
+            click_attempted=click_called,
+            input_method="playwright_fill" if input_called else None,
+            click_method="playwright_click" if click_called else None,
             clicked_tag=sender_meta.get("tag") if isinstance(sender_meta, dict) else None,
             clicked_classes=sender_meta.get("classes") if isinstance(sender_meta, dict) else [],
             receipt="absent",
             ledger_sealed=True,
+            input_returned=input_returned,
+            click_returned=click_returned,
+            phases=trace.public(),
             input_state=state,
             appearance="reply_scan_incomplete" if state.get("reply_scan_truncated") else "input_retained_receipt_absent" if retained else "receipt_absent",
             receipt_wait_seconds=receipt_wait_seconds,
