@@ -86,7 +86,9 @@ python -m inbox_collector confirmed-text-send --data-dir data --challenge '客�
 
 退出码 0 仅当 `status` 是 `page_visible`，并且 `delivery_claimed` 和 `production_send_allowed` 都是 false。其它状态退出码 2。未知 `op`、`field_rejected`、`request_rejected` 也是退出码 2。
 
-已经 `paused_uncertain` 的 ledger 不能删，不能换窗口标记，也不能再写一份授权重发。下一次正常启动才能执行新的只读查询，当前旧进程不会有这个查询；现在不要为了看输入框布尔值去重载，否则框里的原文会丢掉：
+`data/confirmed-text.ledger.json` 是旧的封存记录，程序只读它，不会改写、迁移或删除。旧挑战或旧正文有任一项相同，都继续拒绝。文件缺失、读不出或字段冲突时，新的发送也拒绝。另一次测试必须是明确的新挑战和另一句原文，并单独写入 `confirmed-text.attempts/`；这一步默认不会发生。只读诊断和改配置都不会生成授权，也不会输入或点击。旧的 `test-send` 不是这条路径的替代。
+
+已经发生过的不确定发送不能靠新授权、新窗口标记或另一个 data 目录复活。下面的只读命令不创建授权：
 
 ```bash
 python -m inbox_collector diagnose-dom --data-dir data --timeout-seconds 5 --op input-state-readonly --probe-phrase '客服配对1109-A7'

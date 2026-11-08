@@ -522,7 +522,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0 if report.get("status") == "test_sent" and report.get("production_send_allowed") is False else 2
     if args.command == "confirmed-text-send":
         from inbox_collector.confirmed_text import (
-            _ledger_state,
+            confirmed_send_block,
             read_window_id,
             reply_problem,
             write_authorization,
@@ -544,8 +544,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not 30 <= args.expires_seconds <= 900 or args.timeout_seconds <= 0:
             _print({"status": "authorization_expired", **refused})
             return 2
-        if _ledger_state(args.data_dir) is not None:
-            _print({"status": "ledger_closed", "ledger_sealed": True, **refused})
+        blocked = confirmed_send_block(args.data_dir, args.challenge, args.reply)
+        if blocked:
+            _print({"status": blocked, "ledger_sealed": True, **refused})
             return 2
         window_id = read_window_id(args.data_dir)
         if window_id is None:

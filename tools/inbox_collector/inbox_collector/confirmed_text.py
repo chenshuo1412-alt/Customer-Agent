@@ -7,6 +7,7 @@ A sealed ledger is never retried.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -18,9 +19,13 @@ from typing import Any
 
 _AUTH = "confirmed-text.auth.json"
 _LEDGER = "confirmed-text.ledger.json"
+_ATTEMPTS = "confirmed-text.attempts"
 _WINDOW = "login-prep.window.json"
 _SCOPE = "single_confirmed_text"
+_KIND = "independent_single_test"
 _BUYER = "operator_confirmed_own_account"
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+_LEGACY_STATES = frozenset({"uncertain", "revoked", "page_visible", "committed", "sealed"})
 _MAX_REPLY = 40
 _FORBIDDEN = ("价格", "物流", "规格", "安装", "售后", "退款", "改价", "补偿", "赔")
 
@@ -313,6 +318,8 @@ def write_authorization(
     data_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "scope": _SCOPE,
+        "authorization_kind": _KIND,
+        "authorization_id": secrets.token_hex(16),
         "buyer_source": _BUYER,
         "challenge_sha256": digest(challenge),
         "reply_sha256": digest(reply),
@@ -369,6 +376,117 @@ def _report(status: str, **extra: Any) -> dict[str, Any]:
     return report
 
 
+def read_legacy(data_dir: Path) -> tuple[str | None, dict[str, str] | None]:
+    """Read the historical seal. This function never creates or rewrites it."""
+    path = data_dir / _LEDGER
+    if not path.is_file():
+        return "legacy_missing", None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return "legacy_unreadable", None
+    if not isinstance(payload, dict) or payload.get("sealed") is not True or payload.get("retry_allowed") is not False:
+        return "legacy_conflict", None
+    state = payload.get("state")
+    challenge = payload.get("challenge_sha256")
+    reply = payload.get("reply_sha256")
+    if state not in _LEGACY_STATES or not isinstance(challenge, str) or not isinstance(reply, str):
+        return "legacy_conflict", None
+    if _HEX64.fullmatch(challenge) is None or _HEX64.fullmatch(reply) is None or challenge == reply:
+        return "legacy_conflict", None
+    return None, {"challenge_sha256": challenge, "reply_sha256": reply, "state": state}
+
+
+def confirmed_send_block(data_dir: Path, challenge: str, reply: str) -> str | None:
+    """Return a refusal code. Missing or damaged history blocks every new send."""
+    problem, record = read_legacy(data_dir)
+    if problem:
+        return problem
+    if record is None:
+        return "legacy_missing"
+    if digest(challenge) == record["challenge_sha256"] or digest(reply) == record["reply_sha256"]:
+        return "legacy_blocked"
+    if _attempt_exists(data_dir, challenge, reply):
+        return "attempt_consumed"
+    return None
+
+
+def _attempt_root(data_dir: Path) -> Path:
+    return data_dir / _ATTEMPTS
+
+
+def _attempt_paths(data_dir: Path, challenge: str, reply: str) -> tuple[Path, Path]:
+    root = _attempt_root(data_dir)
+    return root / f"c-{digest(challenge)}", root / f"r-{digest(reply)}"
+
+
+def _attempt_exists(data_dir: Path, challenge: str, reply: str) -> bool:
+    challenge_path, reply_path = _attempt_paths(data_dir, challenge, reply)
+    return challenge_path.exists() or reply_path.exists()
+
+
+def _claim_attempt(data_dir: Path, challenge: str, reply: str, authorization_id: str) -> str | None:
+    root = _attempt_root(data_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    os.chmod(root, 0o700)
+    lock_fd = os.open(root / ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        challenge_path, reply_path = _attempt_paths(data_dir, challenge, reply)
+        if challenge_path.exists() or reply_path.exists():
+            return "attempt_consumed"
+        body = json.dumps(
+            {
+                "sealed": True,
+                "retry_allowed": False,
+                "state": "committed",
+                "challenge_sha256": digest(challenge),
+                "reply_sha256": digest(reply),
+                "authorization_id": authorization_id,
+                "durable": False,
+            },
+            ensure_ascii=False,
+        ) + "\n"
+        opened: list[Path] = []
+        try:
+            for path in (challenge_path, reply_path):
+                handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                with os.fdopen(handle, "w", encoding="utf-8") as fh:
+                    fh.write(body)
+                opened.append(path)
+        except FileExistsError:
+            return "attempt_consumed"
+        return None
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
+def _mark_attempt(data_dir: Path, challenge: str, reply: str, state: str) -> None:
+    challenge_path, reply_path = _attempt_paths(data_dir, challenge, reply)
+    root = _attempt_root(data_dir)
+    lock_fd = os.open(root / ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        for path in (challenge_path, reply_path):
+            if not path.is_file():
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            payload["state"] = state
+            payload["sealed"] = True
+            payload["retry_allowed"] = False
+            path.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+            os.chmod(path, 0o600)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
 def _ledger_state(data_dir: Path) -> str | None:
     path = data_dir / _LEDGER
     if not path.is_file():
@@ -382,18 +500,10 @@ def _ledger_state(data_dir: Path) -> str | None:
     return str(payload.get("state") or "sealed")
 
 
-def _write_ledger(data_dir: Path, *, challenge: str, reply: str, state: str) -> None:
-    payload = {
-        "sealed": True,
-        "state": state,
-        "retry_allowed": False,
-        "challenge_sha256": digest(challenge),
-        "reply_sha256": digest(reply),
-        "durable": False,
-    }
-    path = data_dir / _LEDGER
-    path.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
-    os.chmod(path, 0o600)
+def _with_legacy(data_dir: Path, before: bytes | None, report: dict[str, Any]) -> dict[str, Any]:
+    report["legacy_unchanged"] = _ledger_bytes(data_dir) == before
+    report["production_send_allowed"] = False
+    return report
 
 
 def _load_auth(
@@ -403,6 +513,7 @@ def _load_auth(
     now: float,
     *,
     allow_stale_window: bool = False,
+    require_kind: bool = False,
 ) -> tuple[str | None, dict[str, Any] | None]:
     path = data_dir / _AUTH
     if not path.is_file():
@@ -412,6 +523,8 @@ def _load_auth(
     except (OSError, json.JSONDecodeError):
         return "authorization_unreadable", None
     if not isinstance(payload, dict) or payload.get("scope") != _SCOPE:
+        return "authorization_mismatch", None
+    if require_kind and payload.get("authorization_kind") != _KIND:
         return "authorization_mismatch", None
     if payload.get("buyer_source") != _BUYER:
         return "buyer_source_unconfirmed", None
@@ -561,19 +674,23 @@ def run_confirmed_text(
 ) -> dict[str, Any]:
     """Type one authorized sentence with Playwright, or refuse before touching the composer."""
     moment = time.time() if now is None else now
-    sealed = _ledger_state(data_dir)
-    if sealed is not None:
-        return _report("ledger_closed", ledger_sealed=True, error="ledger_closed")
-    problem, auth = _load_auth(data_dir, challenge, window_id, moment)
+    legacy_before = _ledger_bytes(data_dir)
+    legacy_problem, _legacy = read_legacy(data_dir)
+    if legacy_problem:
+        return _with_legacy(data_dir, legacy_before, _report(legacy_problem, ledger_sealed=True))
+    problem, auth = _load_auth(data_dir, challenge, window_id, moment, require_kind=True)
     if problem or auth is None:
-        return _report(problem or "authorization_missing")
+        return _with_legacy(data_dir, legacy_before, _report(problem or "authorization_missing"))
     reply = str(auth["reply_text"])
+    blocked = confirmed_send_block(data_dir, challenge, reply)
+    if blocked:
+        return _with_legacy(data_dir, legacy_before, _report(blocked, ledger_sealed=True))
     try:
         raw = page.evaluate(_READ_JS, {"challenge": challenge, "reply": reply})
     except Exception as exc:
-        return _report("evaluate_failed", error_type=type(exc).__name__)
+        return _with_legacy(data_dir, legacy_before, _report("evaluate_failed", error_type=type(exc).__name__))
     if not isinstance(raw, dict) or raw.get("marker") != "CONFIRMED_TEXT_READ":
-        return _report("evaluate_invalid")
+        return _with_legacy(data_dir, legacy_before, _report("evaluate_invalid"))
     gate = _read_gate(raw)
     row_hash = _stable_id_hash(str(raw.get("row_id_raw") or ""))
     context = {
@@ -584,8 +701,10 @@ def run_confirmed_text(
     }
     if gate:
         report = _report(gate, **context)
-        return _leak_guard(report, challenge, reply)
-    _write_ledger(data_dir, challenge=challenge, reply=reply, state="committed")
+        return _with_legacy(data_dir, legacy_before, _leak_guard(report, challenge, reply))
+    claim = _claim_attempt(data_dir, challenge, reply, str(auth.get("authorization_id") or ""))
+    if claim:
+        return _with_legacy(data_dir, legacy_before, _report(claim, ledger_sealed=True))
     action_arg = {
         "challenge": challenge,
         "reply": reply,
@@ -595,18 +714,18 @@ def run_confirmed_text(
     try:
         recheck = page.evaluate(_OBSERVE_JS, action_arg)
     except Exception as exc:
-        _write_ledger(data_dir, challenge=challenge, reply=reply, state="uncertain")
-        return _report("evaluate_failed", ledger_sealed=True, error_type=type(exc).__name__, **context)
+        _mark_attempt(data_dir, challenge, reply, "uncertain")
+        return _with_legacy(data_dir, legacy_before, _report("evaluate_failed", ledger_sealed=True, error_type=type(exc).__name__, **context))
     if not isinstance(recheck, dict) or recheck.get("marker") != "INPUT_STATE_READONLY":
-        _write_ledger(data_dir, challenge=challenge, reply=reply, state="uncertain")
-        return _report("paused_uncertain", ledger_sealed=True, receipt="absent", **context)
+        _mark_attempt(data_dir, challenge, reply, "uncertain")
+        return _with_legacy(data_dir, legacy_before, _report("paused_uncertain", ledger_sealed=True, receipt="absent", **context))
     if recheck.get("panel_fingerprint") != raw.get("panel_fingerprint") or str(recheck.get("row_id_raw") or "") != str(raw.get("row_id_raw") or ""):
-        _write_ledger(data_dir, challenge=challenge, reply=reply, state="revoked")
-        return _leak_guard(_report("panel_changed", ledger_sealed=True, input_state=_clean_state(recheck, before=int(recheck.get("reply_exact_count") or 0)), **context), challenge, reply)
+        _mark_attempt(data_dir, challenge, reply, "revoked")
+        return _with_legacy(data_dir, legacy_before, _leak_guard(_report("panel_changed", ledger_sealed=True, input_state=_clean_state(recheck, before=int(recheck.get("reply_exact_count") or 0)), **context), challenge, reply))
     pre_gate = _read_gate({**raw, "input_empty": recheck.get("input_nonempty") is False, "input_count": recheck.get("input_count"), "sender_count": recheck.get("sender_count"), "reply_visible_count": recheck.get("reply_exact_count"), "panel_fingerprint": recheck.get("panel_fingerprint")})
     if pre_gate:
-        _write_ledger(data_dir, challenge=challenge, reply=reply, state="revoked")
-        return _leak_guard(_report(pre_gate, ledger_sealed=True, input_state=_clean_state(recheck), **context), challenge, reply)
+        _mark_attempt(data_dir, challenge, reply, "revoked")
+        return _with_legacy(data_dir, legacy_before, _leak_guard(_report(pre_gate, ledger_sealed=True, input_state=_clean_state(recheck), **context), challenge, reply))
     before_count = int(recheck.get("reply_exact_count") or 0)
     bundle = None
     input_attempted = False
@@ -615,12 +734,12 @@ def run_confirmed_text(
         bundle = page.evaluate_handle(_HANDLES_JS, action_arg)
         picked = bundle.evaluate("(item) => ({ ok: item.ok === true, status: item.status || 'unavailable' })")
         if not isinstance(picked, dict) or picked.get("ok") is not True:
-            _write_ledger(data_dir, challenge=challenge, reply=reply, state="revoked")
-            return _leak_guard(
+            _mark_attempt(data_dir, challenge, reply, "revoked")
+            return _with_legacy(data_dir, legacy_before, _leak_guard(
                 _report(str(picked.get("status") if isinstance(picked, dict) else "panel_changed"), ledger_sealed=True, input_state=_clean_state(recheck, before=before_count), **context),
                 challenge,
                 reply,
-            )
+            ))
         field = bundle.get_property("field").as_element()
         sender = bundle.get_property("sender").as_element()
         if field is None or sender is None:
@@ -632,14 +751,14 @@ def run_confirmed_text(
             })"""
         )
         if field.input_value() != "":
-            _write_ledger(data_dir, challenge=challenge, reply=reply, state="revoked")
-            return _leak_guard(_report("draft_present", ledger_sealed=True, input_state=_clean_state(recheck, before=before_count), **context), challenge, reply)
+            _mark_attempt(data_dir, challenge, reply, "revoked")
+            return _with_legacy(data_dir, legacy_before, _leak_guard(_report("draft_present", ledger_sealed=True, input_state=_clean_state(recheck, before=before_count), **context), challenge, reply))
         field.fill(reply)
         input_attempted = True
         accepted = page.evaluate(_OBSERVE_JS, action_arg)
         if not isinstance(accepted, dict) or accepted.get("input_equals_reply") is not True:
-            _write_ledger(data_dir, challenge=challenge, reply=reply, state="uncertain")
-            return _leak_guard(
+            _mark_attempt(data_dir, challenge, reply, "uncertain")
+            return _with_legacy(data_dir, legacy_before, _leak_guard(
                 _report(
                     "input_not_accepted",
                     ledger_sealed=True,
@@ -651,7 +770,7 @@ def run_confirmed_text(
                 ),
                 challenge,
                 reply,
-            )
+            ))
         sender.click()
         click_attempted = True
         deadline = time.monotonic() + receipt_wait_seconds
@@ -664,8 +783,8 @@ def run_confirmed_text(
                 break
             time.sleep(RECEIPT_POLL_SECONDS)
     except Exception as exc:
-        _write_ledger(data_dir, challenge=challenge, reply=reply, state="uncertain")
-        return _report(
+        _mark_attempt(data_dir, challenge, reply, "uncertain")
+        return _with_legacy(data_dir, legacy_before, _report(
             "evaluate_failed" if not input_attempted and not click_attempted else "paused_uncertain",
             ledger_sealed=True,
             input_attempted=input_attempted,
@@ -677,7 +796,7 @@ def run_confirmed_text(
             error_type=type(exc).__name__,
             receipt="absent" if input_attempted or click_attempted else "not_sent",
             **context,
-        )
+        ))
     finally:
         if bundle is not None:
             try:
@@ -687,8 +806,8 @@ def run_confirmed_text(
     appeared = isinstance(latest, dict) and int(latest.get("reply_exact_count") or 0) > before_count
     state = _clean_state(latest if isinstance(latest, dict) else {}, before=before_count)
     if appeared and input_attempted and click_attempted:
-        _write_ledger(data_dir, challenge=challenge, reply=reply, state="page_visible")
-        return _leak_guard(
+        _mark_attempt(data_dir, challenge, reply, "page_visible")
+        return _with_legacy(data_dir, legacy_before, _leak_guard(
             _report(
                 "page_visible",
                 error=None,
@@ -708,10 +827,10 @@ def run_confirmed_text(
             ),
             challenge,
             reply,
-        )
-    _write_ledger(data_dir, challenge=challenge, reply=reply, state="uncertain")
+        ))
+    _mark_attempt(data_dir, challenge, reply, "uncertain")
     retained = bool(state.get("input_equals_reply")) and not appeared
-    return _leak_guard(
+    return _with_legacy(data_dir, legacy_before, _leak_guard(
         _report(
             "paused_uncertain",
             clicked=click_attempted,
@@ -731,7 +850,7 @@ def run_confirmed_text(
         ),
         challenge,
         reply,
-    )
+    ))
 
 
 def _leak_guard(report: dict[str, Any], challenge: str, reply: str) -> dict[str, Any]:
