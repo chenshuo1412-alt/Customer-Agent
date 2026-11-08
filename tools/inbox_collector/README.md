@@ -54,13 +54,21 @@ Profile 里会留下登录态，只放在本机，不要复制、同步或提交
 
 导出的仍是标签名、属性名、安全 class、frame 计数和来源分类、覆盖范围、真实截断原因，以及原来的值形状分类。`li.chat-item` 只算会话列表，不能单独让 `message_region` 为 true。消息 preflight 只在 `content-box` 里的 `li.onemsg` 上关联子孙时间节点和邻接日期头，`merchantMessage` / `buyer-item` 只记结构、不从名字判断方向，`isread` 只记 `read_unknown`。同一页会做两次观察比较可见行 id，但同页稳定不等于跨重启稳定。原始 id、正文、身份、日期原文和 URL 不会写出。生产 mapping 仍是 false。
 
-下一次实页验收只读，不点输入框、不发送。在已经打开的 login-prep 旁执行：
+正在运行的旧 login-prep 不会执行短句核验或测试发送。换成这一版之后，重复诊断和一次测试发送只写请求文件。
 
 ```bash
-python -m inbox_collector diagnose-dom --data-dir data --timeout-seconds 5 --summary
+python -m inbox_collector diagnose-dom --data-dir data --timeout-seconds 5 --summary --probe-phrase '客服测试2006'
 ```
 
-看 `page_acceptance`。`official_composer_verified` 必须仍是 false。`usable_input_count` 和 `send_label_button_count` 只说明有没有可见且未禁用的输入框，以及按钮文字是不是恰好「发送」。`conversation_binding` 没有共享身份时就是未绑定。`direction_evidence` 不会因为 `buyer-item` 这个名字变成买家。`human_checks` 里若要求看一条已知买家气泡和一条商家气泡，只回答结构是否对应，不要粘贴正文。
+`phrase_probe.unique` 为 true 表示这句在当前可见消息区恰好一条。`list_binding` 仍是 `not_proven_no_shared_identity`。`controls_verified_for_test` 为 true 表示消息区内恰好一个可见输入框，且旁边恰好一个文字命中「发送」的控件；按钮里的「发送」加 Enter 子节点也算命中。结果不包含这句原文、姓名、id 或时间。
+
+只对这一句发送一次，不是全店托管：
+
+```bash
+python -m inbox_collector test-send --data-dir data --probe-phrase '客服测试2006' --opt-in single-test-conversation --timeout-seconds 60
+```
+
+成功时 `status` 是 `test_sent`，`receipt` 是 `matched`，`production_send_allowed` 和 `storewide_auto_reply` 都是 false。若这句后面已经有回复，结果是 `refused_newer_or_reply_present`。那时只需要买家号再发一条新的唯一短句，并改用那句做 `--probe-phrase`。
 
 本机 Ollama 模拟发送用一条独立命令。它会自建临时浏览器 profile 和临时页面，只访问 `http://127.0.0.1:11434` 的 `qwen-kefu:latest`，不碰已经登录的 Chrome：
 

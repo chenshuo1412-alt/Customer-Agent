@@ -1119,6 +1119,111 @@ class BrowserE2ETest(unittest.TestCase):
         self.assertIn(("GET", "/api/tags"), seen)
         self.assertIn(("/api/generate", "qwen-kefu:latest", 24), seen)
 
+    def test_probe_phrase_and_single_test_send_stay_on_that_sentence(self) -> None:
+        from inbox_collector.auto_reply import LoopbackGenerator
+        from inbox_collector.browser_session import DedicatedBrowser
+        from inbox_collector.dom_diagnose import export_rendered_dom, service_diagnose_request
+        from inbox_collector.test_send import run_owned_test_send, write_opt_in
+
+        phrase = "客服测试2006"
+        page = (
+            "<div class='content-box'>"
+            "<li class='onemsg'><div class='merchantMessage'><p class='msg-content-box'>旧记录</p></div></li>"
+            f"<li class='onemsg' id='secret-id'><div class='merchantMessage'><div class='buyer-item'>"
+            f"<p class='msg-content-box'>{phrase}</p></div><p class='message-time'>20:36</p></div></li>"
+            "<div class='composer'><textarea class='reply-editor'></textarea>"
+            "<button class='el-button el-button--primary el-button--mini' type='button' id='sim-send'>"
+            "<span>发送</span><span>Enter</span></button></div></div>"
+            "<script>window.__sendClicks=0;"
+            "document.querySelector('#sim-send').addEventListener('click', () => {"
+            "window.__sendClicks += 1;"
+            "const text = document.querySelector('.reply-editor').value;"
+            "const item = document.createElement('li'); item.className='onemsg';"
+            "item.textContent=text; document.querySelector('.content-box').appendChild(item);"
+            "});</script>"
+        )
+        self.html_path.write_text(f"<!DOCTYPE html><body>{page}</body></html>", encoding="utf-8")
+        browser = DedicatedBrowser(self.data / "phrase-profile")
+        browser.start()
+        self.addCleanup(browser.close)
+        browser.page.goto(f"http://127.0.0.1:{self.port}/inbox.html")
+
+        def transport(method: str, path: str, body: dict | None, timeout: int) -> tuple[int, dict]:
+            if path == "/api/tags":
+                return 200, {"models": [{"name": "qwen-kefu:latest", "size": 1117321521, "details": {"family": "qwen2"}}]}
+            assert body is not None
+            self.assertNotIn(phrase, body["prompt"])
+            return 200, {"response": "已收到测试。", "done": True, "done_reason": "stop"}
+
+        report = export_rendered_dom(browser.page, timeout_seconds=5, probe_phrase=phrase)
+        rendered = json.dumps(report, ensure_ascii=False)
+        self.assertNotIn(phrase, rendered)
+        self.assertNotIn("secret-id", rendered)
+        self.assertNotIn("20:36", rendered)
+        self.assertNotIn("旧记录", rendered)
+        probe = report["phrase_probe"]
+        self.assertTrue(probe["unique"])
+        self.assertEqual(probe["match_count"], 1)
+        self.assertEqual(probe["list_binding"], "not_proven_no_shared_identity")
+        self.assertEqual(probe["row"]["buyer_item"], "inside_merchant_message")
+        self.assertEqual(probe["row"]["direction_source"], "operator_declared_test_phrase")
+        self.assertEqual(probe["row"]["later_visible_rows"], 0)
+        self.assertEqual(probe["row"]["reply_status"], "read_unknown")
+        self.assertTrue(probe["controls_verified_for_test"])
+        self.assertEqual(probe["input_in_message_region"], 1)
+        self.assertEqual(probe["send_label_near_input"], 1)
+        self.assertFalse(probe["production_send_allowed"])
+        self.assertFalse(report["production_mapping_validated"])
+
+        sent = run_owned_test_send(
+            browser.page,
+            self.data,
+            phrase,
+            transport=transport,
+            transport_label="injected_test_double",
+        )
+        self.assertEqual(sent["status"], "opt_in_missing")
+        self.assertEqual(browser.page.evaluate("() => window.__sendClicks"), 0)
+        write_opt_in(self.data, phrase)
+        sent = run_owned_test_send(
+            browser.page,
+            self.data,
+            phrase,
+            transport=transport,
+            transport_label="injected_test_double",
+        )
+        self.assertEqual(sent["status"], "test_sent")
+        self.assertEqual(sent["receipt"], "matched")
+        self.assertTrue(sent["injected_test_transport"])
+        self.assertFalse(sent["production_send_allowed"])
+        self.assertFalse(sent["storewide_auto_reply"])
+        self.assertNotIn(phrase, json.dumps(sent, ensure_ascii=False))
+        self.assertEqual(browser.page.evaluate("() => window.__sendClicks"), 1)
+        again = run_owned_test_send(
+            browser.page,
+            self.data,
+            phrase,
+            transport=transport,
+            transport_label="injected_test_double",
+        )
+        self.assertEqual(again["status"], "send_cap_reached")
+        self.assertEqual(browser.page.evaluate("() => window.__sendClicks"), 1)
+
+        self.html_path.write_text(
+            "<!DOCTYPE html><body><div class='content-box'>"
+            f"<li class='onemsg'><p class='msg-content-box'>{phrase}</p></li>"
+            f"<li class='onemsg'><p class='msg-content-box'>{phrase}</p></li>"
+            "<textarea></textarea><button type='button'><span>发送</span></button></div></body></html>",
+            encoding="utf-8",
+        )
+        browser.page.goto(f"http://127.0.0.1:{self.port}/inbox.html")
+        other = self.data / "other-opt"
+        write_opt_in(other, phrase)
+        duplicate = run_owned_test_send(
+            browser.page, other, phrase, transport=transport, transport_label="injected_test_double"
+        )
+        self.assertEqual(duplicate["status"], "probe_not_unique")
+
     def test_diagnose_uses_the_open_page_without_navigation(self) -> None:
         from inbox_collector.dom_diagnose import export_rendered_dom, service_diagnose_request
 

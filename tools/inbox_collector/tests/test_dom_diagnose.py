@@ -22,7 +22,7 @@ class FakePage:
     def set_default_timeout(self, timeout: int) -> None:
         self.calls.append(f"timeout:{timeout}")
 
-    def evaluate(self, script: str):
+    def evaluate(self, script: str, *_args: object):
         self.calls.append("evaluate")
         if "cookie" in script or "localStorage" in script or "click(" in script:
             raise AssertionError("diagnose script is not read-only")

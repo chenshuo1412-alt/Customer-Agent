@@ -166,11 +166,18 @@ def _diagnose_summary(payload: dict[str, Any]) -> dict[str, Any]:
         },
         "production_mapping_validated": False,
         "production_send_allowed": False,
+        "phrase_probe": payload.get("phrase_probe"),
         "nodes_omitted": True,
     }
 
 
-def cmd_diagnose_dom(data_dir: Path, timeout_seconds: float, *, summary: bool = False) -> int:
+def cmd_diagnose_dom(
+    data_dir: Path,
+    timeout_seconds: float,
+    *,
+    summary: bool = False,
+    probe_phrase: str = "",
+) -> int:
     """Ask the already-running login-prep process. Never starts a browser."""
     from inbox_collector.dom_diagnose import wait_for_diagnose_result
 
@@ -178,7 +185,11 @@ def cmd_diagnose_dom(data_dir: Path, timeout_seconds: float, *, summary: bool = 
         _print({"status": "diagnostic_error", "reason": "timeout_invalid", "platform_unsupported": False, "nodes": None})
         return 2
     data_dir.mkdir(parents=True, exist_ok=True)
-    payload = wait_for_diagnose_result(data_dir, timeout_seconds=timeout_seconds)
+    payload = wait_for_diagnose_result(
+        data_dir,
+        timeout_seconds=timeout_seconds,
+        probe_phrase=probe_phrase,
+    )
     if summary and isinstance(payload, dict) and payload.get("status") != "diagnostic_error":
         payload = _diagnose_summary(payload)
     _print(payload)
@@ -394,6 +405,13 @@ def build_parser() -> argparse.ArgumentParser:
     diagnose.add_argument("--data-dir", type=Path, required=True)
     diagnose.add_argument("--timeout-seconds", type=float, default=2.0)
     diagnose.add_argument("--summary", action="store_true")
+    diagnose.add_argument("--probe-phrase", default="")
+
+    test_send = sub.add_parser("test-send")
+    test_send.add_argument("--data-dir", type=Path, required=True)
+    test_send.add_argument("--probe-phrase", required=True)
+    test_send.add_argument("--opt-in", required=True)
+    test_send.add_argument("--timeout-seconds", type=float, default=60)
 
     routine_setup = sub.add_parser("routine-setup")
     routine_setup.add_argument("--url", required=True)
@@ -436,7 +454,33 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "login-prep":
         return cmd_login_prep(args.config)
     if args.command == "diagnose-dom":
-        return cmd_diagnose_dom(args.data_dir, args.timeout_seconds, summary=args.summary)
+        return cmd_diagnose_dom(
+            args.data_dir,
+            args.timeout_seconds,
+            summary=args.summary,
+            probe_phrase=args.probe_phrase,
+        )
+    if args.command == "test-send":
+        from inbox_collector.dom_diagnose import wait_for_diagnose_result
+        from inbox_collector.test_send import write_opt_in
+
+        if args.opt_in != "single-test-conversation":
+            _print({"status": "opt_in_refused", "production_send_allowed": False, "storewide_auto_reply": False})
+            return 2
+        if args.timeout_seconds <= 0:
+            _print({"status": "timeout_invalid", "production_send_allowed": False})
+            return 2
+        write_opt_in(args.data_dir, args.probe_phrase)
+        report = wait_for_diagnose_result(
+            args.data_dir,
+            timeout_seconds=args.timeout_seconds,
+            probe_phrase=args.probe_phrase,
+            op="test-send",
+        )
+        if args.probe_phrase and args.probe_phrase in json.dumps(report, ensure_ascii=False):
+            report = {"status": "phrase_leaked", "production_send_allowed": False, "storewide_auto_reply": False}
+        _print(report)
+        return 0 if report.get("status") == "test_sent" and report.get("production_send_allowed") is False else 2
     if args.command == "auto-reply-sim":
         from inbox_collector.auto_reply import run_local_ollama_sim
 

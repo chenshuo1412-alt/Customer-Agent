@@ -62,7 +62,7 @@ _TRUNCATION_REASONS = frozenset(
     }
 )
 _EXPORT_JS = """
-() => {
+(probePhrase) => {
   const MESSAGE = new Set(["content-box", "reply-box"]);
   const LIST = new Set(["chat-list-box", "chatWindowHeader", "chat-item"]);
   const HISTORY = new Set(["loadMoreMsg"]);
@@ -635,10 +635,27 @@ _EXPORT_JS = """
     };
   };
   const controlLabelKind = (el) => {
-    const compact = String(el.innerText || el.textContent || "").replace(/\\s+/g, "");
-    if (!compact) return "empty";
-    if (compact.length > 8) return "other_redacted";
-    if (compact === "发送" || compact.toLowerCase() === "send") return "send";
+    const parts = [];
+    const inline = new Set(["span", "i", "em", "b", "strong", "small"]);
+    const walk = (node, root) => {
+      if (!node) return;
+      if (node.nodeType === 3) {
+        const text = String(node.nodeValue || "").replace(/\\s+/g, "");
+        if (text) parts.push(text);
+        return;
+      }
+      if (node.nodeType !== 1) return;
+      const tag = String(node.tagName || "").toLowerCase();
+      if (node !== root && !inline.has(tag)) return;
+      for (const child of Array.from(node.childNodes || [])) walk(child, root);
+    };
+    walk(el, el);
+    if (!parts.length) return "empty";
+    const allow = (text) => text === "发送" || text.toLowerCase() === "send";
+    if (parts.some(allow)) return "send";
+    const compact = parts.join("");
+    const stripped = compact.replace(/(?:[(（])?(?:enter|ctrl\\+enter)(?:[)）])?$/i, "");
+    if (allow(stripped)) return "send";
     return "other_redacted";
   };
   const controlRecord = (el) => {
@@ -756,6 +773,60 @@ _EXPORT_JS = """
       looked_at: ["aria-selected", "aria-current", "li.chat-item class names", "visible siblings of textarea or text input"]
     };
   };
+  const phraseProbe = (phrase) => {
+    const wanted = String(phrase || "").replace(/\\s+/g, "");
+    if (!wanted) return { provided: false, match_count: 0, unique: false };
+    if (wanted.length < 4 || wanted.length > 32) return { provided: true, accepted: false, match_count: 0, unique: false, reason: "phrase_rejected" };
+    const matches = [];
+    const roots = [];
+    for (const doc of seenDocs) roots.push(doc);
+    for (const shadow of seenShadows) roots.push(shadow);
+    for (const root of roots) {
+      let boxes = [];
+      try { boxes = root.querySelectorAll ? root.querySelectorAll(".content-box") : []; } catch (e) { boxes = []; }
+      for (const box of boxes) {
+        let rows = [];
+        try { rows = box.querySelectorAll("li.onemsg"); } catch (e) { rows = []; }
+        for (const row of rows) {
+          if (isHidden(row)) continue;
+          const content = row.querySelector(".msg-content-box, .msg-content");
+          const text = String(content ? content.textContent : "").replace(/\\s+/g, "");
+          if (text === wanted) matches.push(row);
+        }
+      }
+    }
+    const result = { provided: true, accepted: true, match_count: matches.length, unique: matches.length === 1, list_binding: "not_proven_no_shared_identity" };
+    if (matches.length !== 1) return result;
+    const row = matches[0];
+    const box = row.closest ? row.closest(".content-box") : null;
+    const visible = box ? Array.from(box.querySelectorAll("li.onemsg")).filter((item) => !isHidden(item)) : [];
+    const index = visible.indexOf(row);
+    const merchant = classWithinRow(row, "merchantMessage");
+    const buyer = classWithinRow(row, "buyer-item");
+    let buyerRelation = "absent";
+    if (buyer && merchant && merchant.contains(buyer)) buyerRelation = "inside_merchant_message";
+    else if (buyer) buyerRelation = "elsewhere_in_row";
+    const timeEl = classWithinRow(row, "message-time");
+    result.row = {
+      in_content_box: !!box,
+      visible_index: index,
+      later_visible_rows: index < 0 ? 0 : visible.length - index - 1,
+      earlier_visible_rows: index < 0 ? 0 : index,
+      merchant_message: merchant ? "present" : "absent",
+      buyer_item: buyerRelation,
+      read_mark: classWithinRow(row, "isread") ? "present" : "absent",
+      reply_status: "read_unknown",
+      time_present: !!timeEl,
+      direction_source: "operator_declared_test_phrase"
+    };
+    const inputs = (composerProbe().textareas || []).filter((item) => !item.hidden && item.in_message_region);
+    const senders = (composerProbe().near_input || []).filter((item) => item.label_kind === "send" && !item.hidden);
+    result.input_in_message_region = inputs.length;
+    result.send_label_near_input = senders.length;
+    result.controls_verified_for_test = inputs.length === 1 && senders.length === 1 && index >= 0 && result.row.later_visible_rows === 0;
+    result.production_send_allowed = false;
+    return result;
+  };
   const buildReport = (firstPass, secondPass) => {
     return {
     nodes,
@@ -790,6 +861,7 @@ _EXPORT_JS = """
     },
     message_preflight: summarize(secondPass, comparePasses(firstPass, secondPass)),
     composer_probe: composerProbe(),
+    phrase_probe: phraseProbe(probePhrase),
     value_assessment: { groups, shell_ids: shell }
   };
   };
@@ -1218,13 +1290,46 @@ def _page_acceptance(preflight: dict[str, Any], raw_probe: Any) -> dict[str, Any
     }
 
 
-def export_rendered_dom(page: Any, *, timeout_seconds: float = 2.0) -> dict[str, Any]:
+def _clean_phrase_probe(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {"provided": False, "match_count": 0, "unique": False, "production_send_allowed": False}
+    row = raw.get("row") if isinstance(raw.get("row"), dict) else {}
+    buyer = row.get("buyer_item")
+    merchant = row.get("merchant_message")
+    return {
+        "provided": raw.get("provided") is True,
+        "accepted": raw.get("accepted") is True,
+        "reason": raw.get("reason") if raw.get("reason") in {"phrase_rejected"} else None,
+        "match_count": _clean_int(raw.get("match_count")),
+        "unique": raw.get("unique") is True,
+        "list_binding": "not_proven_no_shared_identity",
+        "row": {
+            "in_content_box": row.get("in_content_box") is True,
+            "visible_index": _clean_int(row.get("visible_index")),
+            "later_visible_rows": _clean_int(row.get("later_visible_rows")),
+            "earlier_visible_rows": _clean_int(row.get("earlier_visible_rows")),
+            "merchant_message": merchant if merchant in {"present", "absent"} else "absent",
+            "buyer_item": buyer if buyer in {"inside_merchant_message", "elsewhere_in_row", "absent"} else "absent",
+            "read_mark": "present" if row.get("read_mark") == "present" else "absent",
+            "reply_status": "read_unknown",
+            "time_present": row.get("time_present") is True,
+            "direction_source": "operator_declared_test_phrase" if raw.get("unique") is True else "not_applied",
+        },
+        "input_in_message_region": _clean_int(raw.get("input_in_message_region")),
+        "send_label_near_input": _clean_int(raw.get("send_label_near_input")),
+        "controls_verified_for_test": raw.get("controls_verified_for_test") is True,
+        "production_send_allowed": False,
+        "values_included": False,
+    }
+
+
+def export_rendered_dom(page: Any, *, timeout_seconds: float = 2.0, probe_phrase: str = "") -> dict[str, Any]:
     """Export structure from an already-open page. It does not call goto or click."""
     if timeout_seconds <= 0:
         return _error("timeout_invalid")
     try:
         page.set_default_timeout(int(timeout_seconds * 1000))
-        raw = page.evaluate(_EXPORT_JS)
+        raw = page.evaluate(_EXPORT_JS, probe_phrase)
     except Exception:
         return _error("evaluate_failed")
     if not isinstance(raw, dict):
@@ -1239,6 +1344,9 @@ def export_rendered_dom(page: Any, *, timeout_seconds: float = 2.0) -> dict[str,
     _apply_scope(report, raw)
     report["message_preflight"] = _clean_preflight(raw.get("message_preflight"))
     report["page_acceptance"] = _page_acceptance(report["message_preflight"], raw.get("composer_probe"))
+    report["phrase_probe"] = _clean_phrase_probe(raw.get("phrase_probe"))
+    if probe_phrase and probe_phrase in json.dumps(report, ensure_ascii=False):
+        report["phrase_probe"] = {"provided": True, "accepted": False, "reason": "phrase_leaked", "match_count": 0, "unique": False, "production_send_allowed": False}
     preflight = report["message_preflight"]
     if (
         preflight.get("visible_rows", 0) > 0
@@ -1258,10 +1366,20 @@ def service_diagnose_request(page: Any, data_dir: Path, *, timeout_seconds: floa
     if not request.is_file():
         return
     try:
+        payload = json.loads(request.read_text(encoding="utf-8") or "{}")
+    except (OSError, json.JSONDecodeError):
+        payload = {}
+    try:
         request.unlink()
     except OSError:
         return
-    result = export_rendered_dom(page, timeout_seconds=timeout_seconds)
+    phrase = payload.get("probe_phrase") if isinstance(payload, dict) and isinstance(payload.get("probe_phrase"), str) else ""
+    if isinstance(payload, dict) and payload.get("op") == "test-send":
+        from inbox_collector.test_send import run_owned_test_send
+
+        result = run_owned_test_send(page, data_dir, phrase)
+    else:
+        result = export_rendered_dom(page, timeout_seconds=timeout_seconds, probe_phrase=phrase)
     target = data_dir / "dom-diagnose.result.json"
     temporary = data_dir / ".dom-diagnose.result.tmp"
     temporary.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -1270,7 +1388,13 @@ def service_diagnose_request(page: Any, data_dir: Path, *, timeout_seconds: floa
     os.chmod(target, 0o600)
 
 
-def wait_for_diagnose_result(data_dir: Path, *, timeout_seconds: float) -> dict[str, Any]:
+def wait_for_diagnose_result(
+    data_dir: Path,
+    *,
+    timeout_seconds: float,
+    probe_phrase: str = "",
+    op: str = "probe",
+) -> dict[str, Any]:
     """Ask the already-running owner to export. This function does not launch a browser."""
     import time
 
@@ -1278,7 +1402,12 @@ def wait_for_diagnose_result(data_dir: Path, *, timeout_seconds: float) -> dict[
     if result_path.exists():
         result_path.unlink()
     request = data_dir / "dom-diagnose.request"
-    request.write_text("{}\n", encoding="utf-8")
+    body: dict[str, str] = {}
+    if op == "test-send":
+        body["op"] = "test-send"
+    if probe_phrase:
+        body["probe_phrase"] = probe_phrase
+    request.write_text(json.dumps(body, ensure_ascii=False) + "\n", encoding="utf-8")
     os.chmod(request, 0o600)
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:

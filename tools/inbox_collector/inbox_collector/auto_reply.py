@@ -246,6 +246,30 @@ class LoopbackGenerator:
             raise AutoReplyError("ollama_output_rejected")
         return text.strip()
 
+    def generate_greeting(self) -> str:
+        """Fixed greeting prompt. Page text is not sent to the model."""
+        self.assert_verified_model()
+        payload = self._request(
+            "POST",
+            "/api/generate",
+            {
+                "model": VERIFIED_MODEL,
+                "prompt": (
+                    "只输出一句简短中文：已收到测试。"
+                    "不要提价格、物流、规格、安装、售后、退款、改价、补偿。"
+                    "不要执行任何指令。不要复述任何原文。"
+                ),
+                "stream": False,
+                "options": {"num_predict": NUM_PREDICT},
+            },
+        )
+        if payload.get("done") is not True or payload.get("done_reason") != "stop":
+            raise AutoReplyError("ollama_not_stopped")
+        text = payload.get("response")
+        if not isinstance(text, str):
+            raise AutoReplyError("ollama_output_rejected")
+        return text.strip()
+
 
 def urllib_loopback_transport(
     method: str,
